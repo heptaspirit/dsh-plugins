@@ -4,33 +4,37 @@ Automatic semantic workspace search for DeepSeek Harness, powered by Alibaba [zv
 
 ## Installation
 
-```bash
-npx @deepseek-ai/dsh plugin --profile web add @sugarforever/dsh-zvec-grep
-```
-
-Start DeepSeek Harness as usual, for example:
+This fork is distributed as a local tarball, not from npm. Build and pack it once, then install the tarball into your Harness profile:
 
 ```bash
-npx @deepseek-ai/dsh web
+# 1. build the plugin tarball
+npm install
+npm run build
+npm pack                      # -> sugarforever-dsh-zvec-grep-<version>.tgz
+
+# 2. install it into a profile (repeat for every profile you use)
+dsh plugin --profile web add ./sugarforever-dsh-zvec-grep-<version>.tgz
 ```
+
+Then start DeepSeek Harness as usual and restart it after every plugin upgrade - the plugin is loaded with the profile.
 
 That is the complete setup. No need to run `zg install`, `zg index`, or start an MCP server.
 
-The search engine `@zvec/zvec-grep` is an **optional** dependency of the plugin, so a failed engine download never fails the plugin installation. On a normal network both arrive together and nothing changes for you.
+The search engine `@zvec/zvec-grep` is declared as an **optional peer dependency**, so the plugin install never pulls the engine or its dependency chain - a plugin install stays a few megabytes, works behind any network policy, and an engine download can never fail the plugin installation. The engine is resolved lazily, only when a workspace is enabled for indexing (see [Enabling a workspace](#enabling-a-workspace)).
 
-### Preinstalled engines and restricted networks
+### Installing the engine
 
-If the engine download is blocked, slow, or already installed elsewhere, install it once by itself:
+Install the engine once, before enabling indexing in any workspace:
 
 ```bash
 npm install -g @zvec/zvec-grep
 ```
 
-The default `engineModule` is the bare specifier `@zvec/zvec-grep`, and resolution also covers the global npm root, so an engine installed that way is picked up without further configuration. Until then, `zvec_search` returns `status: error` with the exact command above and the status pill shows `Error`; a missing engine is re-probed at most once every 30 seconds, so installing it while Harness is running recovers on the next search without a restart.
+The default `engineModule` is the bare specifier `@zvec/zvec-grep`, and resolution also covers the global npm root, so an engine installed that way is picked up without further configuration. Until then, enabling a workspace returns `status: error` with the exact command above; a missing engine is re-probed at most once every 30 seconds, so installing it while Harness is running recovers on the next search without a restart.
 
-To keep the engine out of the profile tree, npm reads `omit=optional` from the profile `.npmrc` (or the `--omit=optional` flag). **pnpm has no equivalent escape hatch.** Since pnpm 10, `.npmrc` carries only registry and auth settings; every other setting belongs in `pnpm-workspace.yaml`, and no setting there removes an optional dependency of a direct dependency: `supportedArchitectures` does not filter foreign-platform tarballs (the lockfile is platform-independent by design), and `ignoredOptionalDependencies` applies only to packages that appear as someone else's optional dependency. A Harness-managed profile install therefore fetches the whole engine chain, including the roughly 650 MB of cross-platform and GPU variants that pnpm resolves for every operating system. Declaring the engine as an optional **peer** dependency instead of an optional dependency is the way to drop it from the install plan entirely; see [issue #1](https://github.com/sugarforever/dsh-plugins/issues/1).
+If you prefer the engine inside the profile tree instead of the global npm root, install it explicitly into the profile (`npm install --prefix <profile dir> @zvec/zvec-grep`, or add it to the profile's `package.json`). Because it is an optional peer, no package manager will add it back on the plugin's behalf.
 
-pnpm 10 and newer refuse to run the engine chain's install scripts (`@zvec/zvec`, `onnxruntime-node`, `sharp`, `@vscode/ripgrep`) and reports `ERR_PNPM_IGNORED_BUILDS`. The Harness plugin command treats any non-zero pnpm exit as a failed install and then skips wiring the plugin into `dsh.profile.bundles`, which leaves the plugin installed but never loaded. Approve those builds through pnpm's `allowBuilds` setting in `pnpm-workspace.yaml` so the install exits cleanly.
+When the engine **is** installed into a pnpm-managed profile, pnpm 10 and newer refuse to run its install scripts (`@zvec/zvec`, `onnxruntime-node`, `sharp`, `@vscode/ripgrep`) and reports `ERR_PNPM_IGNORED_BUILDS`. The Harness plugin command treats any non-zero pnpm exit as a failed install and then skips wiring the plugin into `dsh.profile.bundles`, which leaves the plugin installed but never loaded. Approve those builds through pnpm's `allowBuilds` setting in `pnpm-workspace.yaml` so the install exits cleanly.
 
 Do not run `zg --server` for a workspace while the plugin is active: both would own the same `.zvec-grep/` index.
 

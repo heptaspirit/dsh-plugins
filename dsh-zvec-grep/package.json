@@ -1,6 +1,6 @@
 {
   "name": "@sugarforever/dsh-zvec-grep",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Alibaba zvec-grep workspace search integration for DeepSeek Harness",
   "repository": {
     "type": "git",
@@ -61,10 +61,8 @@
     "@deepseek-ai/schemastery": "^3.18.1",
     "hono": "^4.11.4"
   },
-  "optionalDependencies": {
-    "@zvec/zvec-grep": "^0.2.1"
-  },
   "peerDependencies": {
+    "@zvec/zvec-grep": "^0.2.1",
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-client-connection": ">=0.1.0-rc.1 <1",
     "@deepseek-ai/dsh-client-ui-layout": ">=0.1.0-rc.1 <1",
@@ -76,6 +74,9 @@
     "@deepseek-ai/dsh-tools": ">=0.0.1-rc.1 <1"
   },
   "peerDependenciesMeta": {
+    "@zvec/zvec-grep": {
+      "optional": true
+    },
     "@deepseek-ai/cordis": {
       "optional": true
     },

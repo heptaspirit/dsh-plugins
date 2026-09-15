@@ -6,7 +6,6 @@ import { ENGINE_RANGE } from '../src/engine.ts'
 
 interface PackageJson {
   dependencies: Record<string, string>
-  optionalDependencies?: Record<string, string>
   peerDependencies: Record<string, string>
   peerDependenciesMeta: Record<string, { optional?: boolean }>
 }
@@ -34,11 +33,14 @@ describe('package metadata', () => {
       .toEqual(Object.fromEntries(hostPeers.map(name => [name, { optional: true }])))
   })
 
-  it('keeps the heavy search engine out of the required dependency closure', async () => {
+  it('keeps the heavy search engine out of the install plan as an optional peer', async () => {
     const packageJson = await readPackageJson()
 
+    // An optional *peer* keeps the engine out of pnpm's install plan entirely (plain
+    // optionalDependencies would still pull the whole engine chain on every install).
     expect(packageJson.dependencies['@zvec/zvec-grep']).toBeUndefined()
-    expect(packageJson.optionalDependencies?.['@zvec/zvec-grep']).toBe(ENGINE_RANGE)
+    expect(packageJson.peerDependencies['@zvec/zvec-grep']).toBe(ENGINE_RANGE)
+    expect(packageJson.peerDependenciesMeta['@zvec/zvec-grep']).toEqual({ optional: true })
   })
 
   it('never statically imports the optional engine from the server entry', async () => {
