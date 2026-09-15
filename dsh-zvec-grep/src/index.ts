@@ -3,9 +3,10 @@ import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import z from '@deepseek-ai/schemastery'
 import { DEFAULT_ENGINE_MODULE, EngineLoader } from './engine.ts'
-import { resolveEnabled } from './config-file.ts'
+import { readWorkspaceConfig, resolveEnabled } from './config-file.ts'
 import { WorkspaceSearchRuntime } from './runtime.ts'
 import { createSearchTool, type SearchToolConfig } from './tool.ts'
+import { createManageTool } from './manage-tool.ts'
 import { createWorkspaceWatcher } from './watcher.ts'
 import { registerStatusRoute } from './status-route.ts'
 import { registerToggleRoute } from './toggle-route.ts'
@@ -48,13 +49,14 @@ function activate(runtime: WorkspaceSearchRuntime, ctx: Context, root: string | 
   })
 }
 
-export function mountPlugin(ctx: Context, runtime: WorkspaceSearchRuntime, config: SearchToolConfig): void {
+export function mountPlugin(ctx: Context, runtime: WorkspaceSearchRuntime, config: SearchToolConfig, isEnabled: (root: string) => boolean): void {
   ctx.systemPrompt.section({
     name: 'tool:zvec-search',
     order: 103,
-    text: 'Use zvec_search for semantic or cross-file workspace discovery when wording or location is unknown. Use exact grep for known identifiers, literals, regular expressions, or exhaustive occurrence lists.',
+    text: 'Use zvec_search for semantic or cross-file workspace discovery when wording or location is unknown. Use exact grep for known identifiers, literals, regular expressions, or exhaustive occurrence lists. Use zvec_manage to enable, rescan, or scope the workspace index when the user asks for it.',
   })
   ctx.tools.register(createSearchTool(runtime, config))
+  ctx.tools.register(createManageTool({ runtime, isEnabled }))
   ctx.on('session/created', session => { activate(runtime, ctx, session.header.cwd) }, { global: true })
   for (const session of ctx.sessions.list()) activate(runtime, ctx, session.header.cwd)
   ctx.effect(() => () => runtime.close())
@@ -80,12 +82,13 @@ export function apply(ctx: Context, config: Config): void {
     debounceMs: config.watchDebounceMs ?? 750,
     reconcileIntervalMs: config.reconcileIntervalMs ?? 3_600_000,
     excludePaths: config.excludePaths ?? [],
+    scope: root => readWorkspaceConfig(root)?.scope,
     enabled: isEnabled,
   })
   mountPlugin(ctx, runtime, {
     defaultLimit: config.defaultLimit ?? 10,
     maxLimit: config.maxLimit ?? 30,
-  })
+  }, isEnabled)
   // The status route only writes into the connection service's own registry and is mounted
   // by the connection plugin itself, so it never needs webServer access and must survive
   // even if the experimental toggle channel fails.

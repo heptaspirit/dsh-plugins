@@ -16,13 +16,13 @@ describe('Harness integration', () => {
     }
     const runtime = { activate, close, search: vi.fn() }
 
-    mountPlugin(ctx as never, runtime as never, { defaultLimit: 10, maxLimit: 30 })
+    mountPlugin(ctx as never, runtime as never, { defaultLimit: 10, maxLimit: 30 }, () => true)
     created({ header: { cwd: '/new' } })
     created({ header: {} })
 
     expect(activate).toHaveBeenCalledTimes(2)
     expect(activate).toHaveBeenNthCalledWith(1, '/existing')
     expect(activate).toHaveBeenNthCalledWith(2, '/new')
-    expect(ctx.tools.register).toHaveBeenCalledOnce()
+    expect(ctx.tools.register).toHaveBeenCalledTimes(2)
   })
 })

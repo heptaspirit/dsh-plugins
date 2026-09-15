@@ -4,8 +4,11 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   INDEX_DIR_NAME,
+  dropWorkspaceIndexStorage,
   readWorkspaceConfig,
   resolveEnabled,
+  sanitizeScope,
+  updateWorkspaceConfig,
   workspaceConfigPath,
   workspaceManifestPath,
   writeWorkspaceConfig,
@@ -27,11 +30,11 @@ describe('workspace config file', () => {
     const root = workspace('roundtrip')
     expect(readWorkspaceConfig(root)).toBeUndefined()
 
-    writeWorkspaceConfig(root, false)
+    writeWorkspaceConfig(root, { enabled: false })
     expect(readWorkspaceConfig(root)).toEqual({ enabled: false })
     expect(existsSync(workspaceConfigPath(root))).toBe(true)
 
-    writeWorkspaceConfig(root, true)
+    writeWorkspaceConfig(root, { enabled: true })
     expect(readWorkspaceConfig(root)).toEqual({ enabled: true })
   })
 
@@ -48,9 +51,9 @@ describe('workspace config file', () => {
     expect(resolveEnabled(legacy, false)).toBe(true)
 
     // Rule 1: config.json is authoritative, overriding the manifest either way.
-    writeWorkspaceConfig(legacy, false)
+    writeWorkspaceConfig(legacy, { enabled: false })
     expect(resolveEnabled(legacy, false)).toBe(false)
-    writeWorkspaceConfig(legacy, true)
+    writeWorkspaceConfig(legacy, { enabled: true })
     expect(resolveEnabled(legacy, false)).toBe(true)
   })
 
@@ -61,5 +64,44 @@ describe('workspace config file', () => {
 
     expect(readWorkspaceConfig(broken)).toBeUndefined()
     expect(resolveEnabled(broken, false)).toBe(false)
+  })
+
+  it('persists an independent scope next to the enabled flag', () => {
+    const root = workspace('scope')
+    updateWorkspaceConfig(root, { enabled: true })
+    expect(readWorkspaceConfig(root)).toEqual({ enabled: true })
+
+    const stored = updateWorkspaceConfig(root, { scope: { excludePaths: ['dist'], maxDepth: 5 } })
+    expect(readWorkspaceConfig(root)).toEqual({ enabled: true, scope: { excludePaths: ['dist'], maxDepth: 5 } })
+    expect(stored.scope).toEqual({ excludePaths: ['dist'], maxDepth: 5 })
+
+    // Toggling keeps the scope; replacing the scope keeps the flag.
+    updateWorkspaceConfig(root, { enabled: false })
+    expect(readWorkspaceConfig(root)).toEqual({ enabled: false, scope: { excludePaths: ['dist'], maxDepth: 5 } })
+    updateWorkspaceConfig(root, { scope: { globs: ['*.ts'] } })
+    expect(readWorkspaceConfig(root)).toEqual({ enabled: false, scope: { globs: ['*.ts'] } })
+  })
+
+  it('sanitizes scope fields by type and drops malformed input', () => {
+    expect(sanitizeScope({ excludePaths: ['a'], noIgnore: true, maxDepth: 4 })).toEqual({ excludePaths: ['a'], noIgnore: true, maxDepth: 4 })
+    expect(sanitizeScope({ excludePaths: ['a', 3], maxDepth: 'deep', hidden: 'yes' })).toBeUndefined()
+    expect(sanitizeScope(['not', 'an object'])).toBeUndefined()
+    expect(sanitizeScope({ unknownField: 'dropped' })).toBeUndefined()
+  })
+
+  it('drops index storage while keeping config.json', () => {
+    const root = workspace('drop')
+    mkdirSync(join(root, INDEX_DIR_NAME), { recursive: true })
+    writeFileSync(workspaceManifestPath(root), '{}', 'utf8')
+    writeFileSync(join(root, INDEX_DIR_NAME, 'files.zvec'), 'x', 'utf8')
+    writeWorkspaceConfig(root, { enabled: true })
+
+    dropWorkspaceIndexStorage(root)
+
+    expect(existsSync(workspaceConfigPath(root))).toBe(true)
+    expect(existsSync(workspaceManifestPath(root))).toBe(false)
+    expect(existsSync(join(root, INDEX_DIR_NAME, 'files.zvec'))).toBe(false)
+    // Dropping a workspace without any state is a no-op.
+    expect(() => dropWorkspaceIndexStorage(join(root, 'missing'))).not.toThrow()
   })
 })

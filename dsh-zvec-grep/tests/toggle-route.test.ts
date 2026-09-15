@@ -1,8 +1,8 @@
-import { mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { canonicalizeRoot, workspaceConfigPath } from '../src/config-file.ts'
+import { INDEX_DIR_NAME, canonicalizeRoot, workspaceConfigPath } from '../src/config-file.ts'
 import { TOGGLE_PATH, registerToggleRoute } from '../src/toggle-route.ts'
 
 const HOME = join(tmpdir(), `dsh-zvec-toggle-test-${process.pid}`)
@@ -67,6 +67,23 @@ describe('workspace toggle route', () => {
     expect(JSON.parse(readFileSync(workspaceConfigPath(root), 'utf8'))).toEqual({ enabled: false })
     expect(deactivate).toHaveBeenCalledWith(root)
     expect(activate).not.toHaveBeenCalled()
+  })
+
+  it('keeps an existing scope when the pill toggles the workspace', async () => {
+    const root = workspace('repo')
+    const activate = vi.fn(async () => undefined)
+    const deactivate = vi.fn(async () => undefined)
+    const toggle = routeFetcher({
+      runtime: { activate, deactivate },
+      sessions: { list: () => [{ header: { cwd: root } }] },
+    })
+    mkdirSync(join(root, INDEX_DIR_NAME), { recursive: true })
+    writeFileSync(workspaceConfigPath(root), JSON.stringify({ enabled: true, scope: { excludePaths: ['dist'] } }), 'utf8')
+
+    const { body } = await toggle(`?root=${encodeURIComponent(root)}&enabled=false`)
+
+    expect(body.result).toEqual({ ok: true, value: { root, enabled: false } })
+    expect(JSON.parse(readFileSync(workspaceConfigPath(root), 'utf8'))).toEqual({ enabled: false, scope: { excludePaths: ['dist'] } })
   })
 
   it('rejects a workspace the Harness process does not know without touching the disk', async () => {

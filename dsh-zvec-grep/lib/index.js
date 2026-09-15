@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { existsSync, mkdirSync, readFileSync, realpathSync, watch, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, watch, writeFileSync } from "node:fs";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 
 //#region src/engine.ts
@@ -254,6 +254,54 @@ function workspaceConfigPath(root) {
 function workspaceManifestPath(root) {
 	return join(indexDir(root), "manifest.json");
 }
+const STRING_ARRAY_KEYS = [
+	"includePaths",
+	"excludePaths",
+	"globs",
+	"insensitiveGlobs",
+	"fileTypes",
+	"excludedFileTypes",
+	"ignoreFiles"
+];
+const NUMBER_KEYS = [
+	"maxDepth",
+	"maxFileSizeBytes",
+	"embeddingConcurrency"
+];
+const BOOLEAN_KEYS = [
+	"follow",
+	"hidden",
+	"noIgnore"
+];
+/** Keeps only well-typed scope fields; an empty or malformed object yields `undefined`. */
+function sanitizeScope(input) {
+	if (typeof input !== "object" || input === null || Array.isArray(input)) return void 0;
+	const source = input;
+	const scope = {};
+	let kept = false;
+	for (const key of STRING_ARRAY_KEYS) {
+		const value = source[key];
+		if (Array.isArray(value) && value.every((item) => typeof item === "string" && item.length > 0)) {
+			scope[key] = value;
+			kept = true;
+		}
+	}
+	for (const key of NUMBER_KEYS) {
+		const value = source[key];
+		if (typeof value === "number" && Number.isFinite(value)) {
+			scope[key] = value;
+			kept = true;
+		}
+	}
+	for (const key of BOOLEAN_KEYS) {
+		const value = source[key];
+		if (typeof value === "boolean") {
+			scope[key] = value;
+			kept = true;
+		}
+	}
+	return kept ? scope : void 0;
+}
 function canonicalizeRoot(root) {
 	const absolute = resolve(root);
 	try {
@@ -265,21 +313,40 @@ function canonicalizeRoot(root) {
 /**
 * Reads `.zvec-grep/config.json`. Returns `undefined` when the file is missing or unreadable;
 * a malformed file is treated the same way so a broken config never strands a working
-* workspace on the wrong side of the toggle.
+* workspace on the wrong side of the toggle. Unknown or malformed scope fields are dropped.
 */
 function readWorkspaceConfig(root) {
 	try {
 		const parsed = JSON.parse(readFileSync(workspaceConfigPath(root), "utf8"));
 		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return void 0;
-		const enabled = parsed["enabled"];
-		return typeof enabled === "boolean" ? { enabled } : {};
+		const source = parsed;
+		const config = {};
+		if (typeof source.enabled === "boolean") config.enabled = source.enabled;
+		const scope = sanitizeScope(source.scope);
+		if (scope) config.scope = scope;
+		return config.enabled !== void 0 || config.scope !== void 0 ? config : {};
 	} catch {
 		return;
 	}
 }
-function writeWorkspaceConfig(root, enabled) {
+/** Writes the whole config file; fields left `undefined` are omitted. */
+function writeWorkspaceConfig(root, config) {
 	mkdirSync(indexDir(root), { recursive: true });
-	writeFileSync(workspaceConfigPath(root), `${JSON.stringify({ enabled }, null, 2)}\n`, "utf8");
+	writeFileSync(workspaceConfigPath(root), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+}
+/**
+* Merges one patch into the persisted config: `enabled` and `scope` are independent, and a
+* `scope` patch replaces the previous scope wholesale (no deep merge, so clearing a field
+* really clears it).
+*/
+function updateWorkspaceConfig(root, patch) {
+	const next = {
+		...readWorkspaceConfig(root),
+		...patch
+	};
+	if (next.scope === void 0) delete next.scope;
+	writeWorkspaceConfig(root, next);
+	return next;
 }
 /**
 * Enablement rules, oldest behavior first:
@@ -296,6 +363,20 @@ function resolveEnabled(root, defaultEnabled) {
 	if (config?.enabled !== void 0) return config.enabled;
 	if (existsSync(workspaceManifestPath(root))) return true;
 	return defaultEnabled;
+}
+/**
+* Drops the workspace index but keeps `config.json`, so enablement and scope survive a drop.
+* Everything else under `.zvec-grep/` (manifest, embedding stores, locks) is engine state and
+* is regenerated on the next activation. Used when the workspace may be disabled and therefore
+* has no live engine instance to call `dropIndex()` on.
+*/
+function dropWorkspaceIndexStorage(root) {
+	const dir = indexDir(root);
+	if (!existsSync(dir)) return;
+	for (const entry of readdirSync(dir)) if (entry !== "config.json") rmSync(join(dir, entry), {
+		recursive: true,
+		force: true
+	});
 }
 
 //#endregion
@@ -327,6 +408,7 @@ var WorkspaceSearchRuntime = class {
 			updatedAt: Date.now(),
 			changedPaths: /* @__PURE__ */ new Set(),
 			fullReconcile: false,
+			pendingRebuild: false,
 			engineFailed: false
 		};
 		this.workspaces.set(root, state);
@@ -387,7 +469,7 @@ var WorkspaceSearchRuntime = class {
 				...options,
 				root,
 				autoUpdate: false,
-				...this.excludeFilter()
+				...this.engineOptions(root)
 			})
 		};
 	}
@@ -420,6 +502,37 @@ var WorkspaceSearchRuntime = class {
 		if (!state) return;
 		this.workspaces.delete(root);
 		await this.disposeState(state, "dsh-zvec-grep workspace disabled");
+	}
+	/**
+	* Queues a full rescan that rewrites the manifest filters without re-embedding everything -
+	* the right response to a scope edit, where included files can keep their embeddings.
+	*/
+	reconcile(root) {
+		root = canonicalizeRoot(root);
+		const state = this.workspaces.get(root);
+		if (!state) return;
+		this.queueReconcile(state);
+	}
+	/**
+	* Queues a full rebuild (re-embed everything) through the normal refresh pipeline, so it
+	* cooperates with in-flight refreshes and the watcher instead of racing them.
+	*/
+	rebuild(root) {
+		root = canonicalizeRoot(root);
+		const state = this.workspaces.get(root);
+		if (!state) return;
+		state.pendingRebuild = true;
+		this.queueReconcile(state);
+	}
+	/**
+	* Drops the workspace index storage (manifest + embedding stores, not `config.json`) and
+	* deactivates the workspace, so the next activation re-indexes from scratch. Works on
+	* disabled workspaces too, where there is no live engine to call `dropIndex()` on.
+	*/
+	async drop(root) {
+		root = canonicalizeRoot(root);
+		await this.deactivate(root);
+		dropWorkspaceIndexStorage(root);
 	}
 	async close() {
 		const states = [...this.workspaces.values()];
@@ -454,7 +567,8 @@ var WorkspaceSearchRuntime = class {
 			await (await state.engine).index({
 				root: state.root,
 				signal: state.controller.signal,
-				...this.excludeFilter()
+				resetPaths: true,
+				...this.engineOptions(state.root)
 			});
 			this.setPhase(state, state.changedPaths.size > 0 || state.fullReconcile ? "refreshing" : "ready");
 			state.error = void 0;
@@ -496,15 +610,19 @@ var WorkspaceSearchRuntime = class {
 	}
 	async refresh(state) {
 		const fullReconcile = state.fullReconcile;
+		const rebuild = state.pendingRebuild;
 		const changedPaths = [...state.changedPaths];
 		state.fullReconcile = false;
+		state.pendingRebuild = false;
 		state.changedPaths.clear();
 		try {
 			await (await state.engine).index({
 				root: state.root,
 				signal: state.controller.signal,
-				...fullReconcile ? {} : { changedPaths },
-				...this.excludeFilter()
+				...fullReconcile ? { resetPaths: true } : {},
+				...rebuild ? { rebuild: true } : {},
+				...fullReconcile || rebuild ? {} : { changedPaths },
+				...this.engineOptions(state.root)
 			});
 			this.setPhase(state, state.changedPaths.size > 0 || state.fullReconcile ? "refreshing" : "ready");
 			state.error = void 0;
@@ -517,10 +635,20 @@ var WorkspaceSearchRuntime = class {
 		state.phase = phase;
 		state.updatedAt = Date.now();
 	}
-	/** Omitted entirely when empty, so the engine sees no filter key at all by default. */
-	excludeFilter() {
-		const excludePaths = this.options.excludePaths;
-		return excludePaths && excludePaths.length > 0 ? { excludePaths } : {};
+	/**
+	* The engine options for one workspace, recomputed per call: global `excludePaths` plus the
+	* workspace scope, so a config edit takes effect without deactivating the workspace. Every
+	* index pass sends the complete merged scope with `resetPaths`, because the engine inherits
+	* omitted filter keys from its manifest - without the reset, a cleared scope field would
+	* keep its old persisted value forever.
+	*/
+	engineOptions(root) {
+		const scope = this.options.scope?.(root) ?? {};
+		const excludePaths = [...this.options.excludePaths ?? [], ...scope.excludePaths ?? []];
+		return excludePaths.length > 0 ? {
+			...scope,
+			excludePaths
+		} : { ...scope };
 	}
 };
 
@@ -634,6 +762,155 @@ function createSearchTool(runtime, config) {
 				query: args.query,
 				limit
 			}));
+		}
+	});
+}
+
+//#endregion
+//#region src/manage-tool.ts
+const SCOPE_DESCRIPTION = [
+	"Per-workspace index scope. Fields (all optional):",
+	"includePaths/excludePaths/globs/insensitiveGlobs/fileTypes/excludedFileTypes/ignoreFiles: string arrays;",
+	"maxDepth/maxFileSizeBytes/embeddingConcurrency: numbers;",
+	"follow/hidden/noIgnore: booleans.",
+	"excludePaths follows engine semantics: a bare name matches only a root-level directory; nested paths need a prefix glob like \"src/vendor/**\".",
+	"Setting a scope replaces the previous one wholesale and queues a rescan; omitting the parameter returns the current scope."
+].join(" ");
+/** True when the value looks like a scope object (at least one own key). */
+function isScopeInput(value) {
+	return typeof value === "object" && value !== null && !Array.isArray(value) && Object.keys(value).length > 0;
+}
+function createManageTool(deps) {
+	return defineTool({
+		name: "zvec_manage",
+		description: "Manage the zvec-grep workspace index of the current session workspace: enable or disable indexing, check its status, queue a rescan or full rebuild, drop the index, or read and set the per-workspace scope (which files the index covers). The user turned indexing off for this workspace unless it was enabled explicitly; enable it before searching.",
+		parameters: {
+			action: {
+				type: "string",
+				required: true,
+				description: "One of: enable, disable, status, rebuild, drop, scope."
+			},
+			scope: {
+				type: "object",
+				additionalProperties: true,
+				description: SCOPE_DESCRIPTION
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					action: {
+						type: "string",
+						required: true
+					},
+					root: {
+						type: "string",
+						required: true
+					},
+					enabled: { type: "boolean" },
+					phase: { type: "string" },
+					scope: { type: "json" },
+					configPath: { type: "string" },
+					message: {
+						type: "string",
+						required: true
+					}
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: JSON.stringify(value, null, 2)
+			}]
+		},
+		async execute(args, exec) {
+			const root = exec.agent?.session.header.cwd;
+			if (!root) throw new Error("zvec_manage requires a session workspace");
+			const configPath = workspaceConfigPath(root);
+			switch (args.action) {
+				case "enable":
+					updateWorkspaceConfig(root, { enabled: true });
+					deps.runtime.activate(root).catch(() => void 0);
+					return {
+						action: "enable",
+						root,
+						enabled: true,
+						message: "Indexing enabled; the index is being built in the background. Check with action \"status\"."
+					};
+				case "disable":
+					updateWorkspaceConfig(root, { enabled: false });
+					await deps.runtime.deactivate(root);
+					return {
+						action: "disable",
+						root,
+						enabled: false,
+						message: "Indexing disabled; the index stays on disk and is not searched."
+					};
+				case "rebuild":
+					if (!deps.isEnabled(root)) return {
+						action: "rebuild",
+						root,
+						enabled: false,
+						message: "Indexing is disabled for this workspace; enable it first."
+					};
+					if (deps.runtime.statusFor(root) !== void 0) {
+						deps.runtime.rebuild(root);
+						return {
+							action: "rebuild",
+							root,
+							enabled: true,
+							message: "Full rebuild queued; check with action \"status\"."
+						};
+					}
+					deps.runtime.activate(root).catch(() => void 0);
+					return {
+						action: "rebuild",
+						root,
+						enabled: true,
+						message: "The workspace was not indexed yet; activation with a full index has been started."
+					};
+				case "drop":
+					await deps.runtime.drop(root);
+					return {
+						action: "drop",
+						root,
+						message: "Index dropped. Enablement and scope in config.json are kept; the next activation re-indexes from scratch."
+					};
+				case "scope": {
+					if (!isScopeInput(args.scope)) return {
+						action: "scope",
+						root,
+						scope: readWorkspaceConfig(root)?.scope,
+						configPath,
+						message: "Current scope (empty object means engine defaults apply)."
+					};
+					const scope = sanitizeScope(args.scope);
+					if (!scope) throw new Error("zvec_manage scope contains no valid fields; pass objects like {\"excludePaths\":[\"dist\"]}");
+					updateWorkspaceConfig(root, { scope });
+					deps.runtime.reconcile(root);
+					return {
+						action: "scope",
+						root,
+						scope,
+						configPath,
+						message: "Scope updated and rescan queued; check with action \"status\"."
+					};
+				}
+				default: {
+					const enabled = deps.isEnabled(root);
+					const status = deps.runtime.statusFor(root);
+					return {
+						action: "status",
+						root,
+						enabled,
+						phase: status?.status ?? "inactive",
+						scope: readWorkspaceConfig(root)?.scope,
+						configPath,
+						message: status?.message ?? (enabled ? "Indexing is enabled; the workspace is not active in this session yet and will index on first search." : "Indexing is disabled for this workspace; enable it with action \"enable\".")
+					};
+				}
+			}
 		}
 	});
 }
@@ -764,7 +1041,7 @@ async function applyToggle(deps, payload) {
 			details: {}
 		}
 	};
-	writeWorkspaceConfig(root, parsed.enabled);
+	updateWorkspaceConfig(root, { enabled: parsed.enabled });
 	if (parsed.enabled) deps.runtime.activate(root).catch(() => void 0);
 	else await deps.runtime.deactivate(root);
 	return {
@@ -839,13 +1116,17 @@ function activate(runtime, ctx, root) {
 		ctx.logger.warn(`dsh-zvec-grep: automatic indexing failed for ${root}: ${String(error)}`);
 	});
 }
-function mountPlugin(ctx, runtime, config) {
+function mountPlugin(ctx, runtime, config, isEnabled) {
 	ctx.systemPrompt.section({
 		name: "tool:zvec-search",
 		order: 103,
-		text: "Use zvec_search for semantic or cross-file workspace discovery when wording or location is unknown. Use exact grep for known identifiers, literals, regular expressions, or exhaustive occurrence lists."
+		text: "Use zvec_search for semantic or cross-file workspace discovery when wording or location is unknown. Use exact grep for known identifiers, literals, regular expressions, or exhaustive occurrence lists. Use zvec_manage to enable, rescan, or scope the workspace index when the user asks for it."
 	});
 	ctx.tools.register(createSearchTool(runtime, config));
+	ctx.tools.register(createManageTool({
+		runtime,
+		isEnabled
+	}));
 	ctx.on("session/created", (session) => {
 		activate(runtime, ctx, session.header.cwd);
 	}, { global: true });
@@ -871,12 +1152,13 @@ function apply(ctx, config) {
 		debounceMs: config.watchDebounceMs ?? 750,
 		reconcileIntervalMs: config.reconcileIntervalMs ?? 36e5,
 		excludePaths: config.excludePaths ?? [],
+		scope: (root) => readWorkspaceConfig(root)?.scope,
 		enabled: isEnabled
 	});
 	mountPlugin(ctx, runtime, {
 		defaultLimit: config.defaultLimit ?? 10,
 		maxLimit: config.maxLimit ?? 30
-	});
+	}, isEnabled);
 	const statusFiber = ctx.inject(["connection"], (childCtx) => {
 		childCtx.effect(() => registerStatusRoute(childCtx.connection.fetch, runtime, childCtx.sessions, config.statusPollIntervalMs ?? 2e3, isEnabled), "dsh-zvec-grep: status route");
 	});

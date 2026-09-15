@@ -73,6 +73,29 @@ The first workspace may download the default local embedding model. Indexes are 
 
 Use it when wording or location is unknown, or when the question requires architecture, relationships, control flow, design rationale, or synthesis across files. Use Harness' exact grep for known identifiers, literals, regular expressions, configuration keys, error messages, and exhaustive occurrence lists.
 
+`zvec_manage` governs the calling session's workspace index:
+
+- `enable` / `disable` persist the toggle in `config.json` and start or stop indexing. A disabled workspace makes `zvec_search` report `status: disabled` instead of searching; do not retry, enable the workspace first.
+- `status` reports enablement, index phase, and the current scope without side effects.
+- `rebuild` queues a full re-embed; `drop` deletes the index storage (manifest and embedding stores) while keeping `config.json`, so enablement and scope survive.
+- `scope` reads or sets the per-workspace scope (see below). Setting a scope queues a rescan.
+
+All actions operate on the session's own workspace; the tool cannot touch other directories.
+
+### Workspace scope
+
+The scope controls which files the index covers, per workspace. It is persisted in `config.json` next to the `enabled` flag and supports the engine's filter set: `includePaths`, `excludePaths`, `globs`, `insensitiveGlobs`, `fileTypes`, `excludedFileTypes`, `ignoreFiles`, `maxDepth`, `maxFileSizeBytes`, `follow`, `hidden`, `noIgnore`, and `embeddingConcurrency`.
+
+```jsonc
+// <workspace>/.zvec-grep/config.json
+{
+  "enabled": true,
+  "scope": { "excludePaths": ["src/vendor/**"], "maxDepth": 12 }
+}
+```
+
+Merge rules: workspace `excludePaths` are unioned with the plugin-global `excludePaths`; every other scope field replaces the global default for that workspace. Every index pass sends the complete merged scope with a path-filter reset, so the engine's persisted manifest always mirrors the current scope - clearing a scope field really clears it, and edits take effect on the next index pass without restarting the Harness.
+
 ## Lifecycle
 
 ```text
@@ -123,7 +146,7 @@ config:
     - docs/generated/**
 ```
 
-Use it for directories that stay in version control but carry no semantic search value, or that are maintained by other tooling. It is additive on top of the engine's built-in rules (`.gitignore`, hidden directories, and common build/Vendored defaults such as `node_modules` and `dist`); configured paths are persisted into the workspace manifest, so changing the list takes effect on the next index pass of each workspace.
+Use it for directories that stay in version control but carry no semantic search value, or that are maintained by other tooling. It is additive on top of the engine's built-in rules (`.gitignore`, hidden directories, and common build/Vendored defaults such as `node_modules` and `dist`); configured paths are persisted into the workspace manifest, so changing the list takes effect on the next index pass of each workspace. For per-workspace control from an agent or the config file, see [Workspace scope](#workspace-scope).
 
 ## Development
 

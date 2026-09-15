@@ -39,6 +39,14 @@ export interface ZvecIndexOptions {
   changedPaths?: readonly string[]
   /** Workspace-relative or glob paths the engine must never index (persisted into the manifest). */
   excludePaths?: readonly string[]
+  /** Re-embed everything instead of reusing the existing store. */
+  rebuild?: boolean
+  /**
+   * Discard the filters persisted in the manifest before applying this call's options. Required
+   * for scope changes: the engine inherits omitted keys from the manifest, so without this a
+   * cleared field would keep its old value forever.
+   */
+  resetPaths?: boolean
   signal?: AbortSignal
 }
 

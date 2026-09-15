@@ -1,5 +1,6 @@
-import { canonicalizeRoot } from './config-file.ts'
-import type { SearchEngine, ZvecContextOptions, ZvecContextResult, ZvecIndexOptions } from './engine.ts'
+import { canonicalizeRoot, dropWorkspaceIndexStorage } from './config-file.ts'
+import type { WorkspaceScopeConfig } from './config-file.ts'
+import type { SearchEngine, ZvecContextOptions, ZvecContextResult } from './engine.ts'
 
 export type { SearchEngine } from './engine.ts'
 
@@ -36,6 +37,12 @@ export interface WorkspaceSearchRuntimeOptions {
   /** Paths excluded from every index and search call; empty or undefined means no filter. */
   excludePaths?: readonly string[]
   /**
+   * Per-workspace index scope, re-read on every engine call so config edits apply without a
+   * restart. Workspace `excludePaths` are unioned with the global ones; every other field
+   * replaces the global default for this workspace.
+   */
+  scope?: (root: string) => WorkspaceScopeConfig | undefined
+  /**
    * Per-workspace enablement gate. When provided and it returns false, activation is a no-op
    * and search reports `disabled` instead of lazily starting the engine.
    */
@@ -58,6 +65,8 @@ interface WorkspaceState {
   refresh?: Promise<void>
   changedPaths: Set<string>
   fullReconcile: boolean
+  /** Set by `rebuild()` and consumed by the next refresh pass. */
+  pendingRebuild: boolean
   engineFailed: boolean
 }
 
@@ -91,6 +100,7 @@ export class WorkspaceSearchRuntime {
       updatedAt: Date.now(),
       changedPaths: new Set(),
       fullReconcile: false,
+      pendingRebuild: false,
       engineFailed: false,
     }
     this.workspaces.set(root, state)
@@ -137,7 +147,7 @@ export class WorkspaceSearchRuntime {
     if (state.phase === 'error') return { status: 'error', root, message: errorMessage(state.error) }
 
     const engine = await state.engine
-    const result = await engine.context({ ...options, root, autoUpdate: false, ...this.excludeFilter() })
+    const result = await engine.context({ ...options, root, autoUpdate: false, ...this.engineOptions(root) })
     return { status: 'ready', result }
   }
 
@@ -171,6 +181,40 @@ export class WorkspaceSearchRuntime {
     if (!state) return
     this.workspaces.delete(root)
     await this.disposeState(state, 'dsh-zvec-grep workspace disabled')
+  }
+
+  /**
+   * Queues a full rescan that rewrites the manifest filters without re-embedding everything -
+   * the right response to a scope edit, where included files can keep their embeddings.
+   */
+  reconcile(root: string): void {
+    root = canonicalizeRoot(root)
+    const state = this.workspaces.get(root)
+    if (!state) return
+    this.queueReconcile(state)
+  }
+
+  /**
+   * Queues a full rebuild (re-embed everything) through the normal refresh pipeline, so it
+   * cooperates with in-flight refreshes and the watcher instead of racing them.
+   */
+  rebuild(root: string): void {
+    root = canonicalizeRoot(root)
+    const state = this.workspaces.get(root)
+    if (!state) return
+    state.pendingRebuild = true
+    this.queueReconcile(state)
+  }
+
+  /**
+   * Drops the workspace index storage (manifest + embedding stores, not `config.json`) and
+   * deactivates the workspace, so the next activation re-indexes from scratch. Works on
+   * disabled workspaces too, where there is no live engine to call `dropIndex()` on.
+   */
+  async drop(root: string): Promise<void> {
+    root = canonicalizeRoot(root)
+    await this.deactivate(root)
+    dropWorkspaceIndexStorage(root)
   }
 
   async close(): Promise<void> {
@@ -211,7 +255,7 @@ export class WorkspaceSearchRuntime {
       await state.watcher?.ready
       state.controller.signal.throwIfAborted()
       const engine = await state.engine
-      await engine.index({ root: state.root, signal: state.controller.signal, ...this.excludeFilter() })
+      await engine.index({ root: state.root, signal: state.controller.signal, resetPaths: true, ...this.engineOptions(state.root) })
       this.setPhase(state, state.changedPaths.size > 0 || state.fullReconcile ? 'refreshing' : 'ready')
       state.error = undefined
       state.engineFailed = false
@@ -258,16 +302,20 @@ export class WorkspaceSearchRuntime {
 
   private async refresh(state: WorkspaceState): Promise<void> {
     const fullReconcile = state.fullReconcile
+    const rebuild = state.pendingRebuild
     const changedPaths = [...state.changedPaths]
     state.fullReconcile = false
+    state.pendingRebuild = false
     state.changedPaths.clear()
     try {
       const engine = await state.engine
       await engine.index({
         root: state.root,
         signal: state.controller.signal,
-        ...(fullReconcile ? {} : { changedPaths }),
-        ...this.excludeFilter(),
+        ...(fullReconcile ? { resetPaths: true } : {}),
+        ...(rebuild ? { rebuild: true } : {}),
+        ...(fullReconcile || rebuild ? {} : { changedPaths }),
+        ...this.engineOptions(state.root),
       })
       this.setPhase(state, state.changedPaths.size > 0 || state.fullReconcile ? 'refreshing' : 'ready')
       state.error = undefined
@@ -282,9 +330,16 @@ export class WorkspaceSearchRuntime {
     state.updatedAt = Date.now()
   }
 
-  /** Omitted entirely when empty, so the engine sees no filter key at all by default. */
-  private excludeFilter(): { excludePaths?: readonly string[] } {
-    const excludePaths = this.options.excludePaths
-    return excludePaths && excludePaths.length > 0 ? { excludePaths } : {}
+  /**
+   * The engine options for one workspace, recomputed per call: global `excludePaths` plus the
+   * workspace scope, so a config edit takes effect without deactivating the workspace. Every
+   * index pass sends the complete merged scope with `resetPaths`, because the engine inherits
+   * omitted filter keys from its manifest - without the reset, a cleared scope field would
+   * keep its old persisted value forever.
+   */
+  private engineOptions(root: string): WorkspaceScopeConfig & { resetPaths?: boolean } {
+    const scope = this.options.scope?.(root) ?? {}
+    const excludePaths = [...(this.options.excludePaths ?? []), ...(scope.excludePaths ?? [])]
+    return excludePaths.length > 0 ? { ...scope, excludePaths } : { ...scope }
   }
 }

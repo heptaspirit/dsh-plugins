@@ -1,7 +1,9 @@
-import { realpathSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { WorkspaceSearchRuntime, type SearchEngine, type WorkspaceWatchCallbacks } from '../src/runtime.ts'
+import { INDEX_DIR_NAME } from '../src/config-file.ts'
+import { WorkspaceSearchRuntime, type SearchEngine, type WorkspaceSearchRuntimeOptions, type WorkspaceWatchCallbacks } from '../src/runtime.ts'
 
 /**
  * The runtime canonicalizes every workspace root through realpath before storing it, so tests
@@ -27,14 +29,14 @@ function engine(): SearchEngine {
   }
 }
 
-function harness(backend = engine()) {
+function harness(backend = engine(), options: Partial<WorkspaceSearchRuntimeOptions> = {}) {
   let callbacks!: WorkspaceWatchCallbacks
   const watcher = { close: vi.fn(async () => undefined) }
   const watch = vi.fn((_root: string, next: WorkspaceWatchCallbacks) => {
     callbacks = next
     return watcher
   })
-  const runtime = new WorkspaceSearchRuntime({ create: async () => backend, watch, debounceMs: 25, reconcileIntervalMs: 0 })
+  const runtime = new WorkspaceSearchRuntime({ create: async () => backend, watch, debounceMs: 25, reconcileIntervalMs: 0, ...options })
   return { backend, callbacks: () => callbacks, runtime, watch, watcher }
 }
 
@@ -305,4 +307,76 @@ describe('WorkspaceSearchRuntime', () => {
     const fixture = harness()
     await expect(fixture.runtime.deactivate(WORKSPACE)).resolves.toBeUndefined()
   })
+
+  it('merges global excludePaths with the workspace scope on every engine call', async () => {
+    const scope = vi.fn(() => ({ excludePaths: ['gen'], maxDepth: 3 }))
+    const fixture = harness(engine(), { excludePaths: ['dist'], scope })
+    fixture.runtime.activate(WORKSPACE)
+    await fixture.runtime.settled(WORKSPACE)
+
+    expect(backend_scope_index(fixture)).toEqual(expect.objectContaining({ resetPaths: true, excludePaths: ['dist', 'gen'], maxDepth: 3 }))
+
+    await fixture.runtime.search(WORKSPACE, { query: 'scoped' })
+    expect(scope).toHaveBeenCalledWith(WORKSPACE)
+    expect(fixture.backend.context).toHaveBeenCalledWith(expect.objectContaining({ excludePaths: ['dist', 'gen'], maxDepth: 3, autoUpdate: false }))
+  })
+
+  it('passes the workspace scope alone when no global excludePaths are configured', async () => {
+    const fixture = harness(engine(), { scope: () => ({ hidden: true }) })
+    fixture.runtime.activate(WORKSPACE)
+    await fixture.runtime.settled(WORKSPACE)
+
+    expect(backend_scope_index(fixture)).toEqual(expect.objectContaining({ resetPaths: true, hidden: true }))
+    expect(backend_scope_index(fixture)).not.toHaveProperty('excludePaths')
+  })
+
+  it('queues a rescan with resetPaths on reconcile and a rebuild on rebuild', async () => {
+    vi.useFakeTimers()
+    const fixture = harness()
+    fixture.runtime.activate(WORKSPACE)
+    await fixture.runtime.settled(WORKSPACE)
+
+    fixture.runtime.reconcile(WORKSPACE)
+    await vi.advanceTimersByTimeAsync(25)
+    expect(fixture.backend.index).toHaveBeenLastCalledWith(expect.objectContaining({ resetPaths: true }))
+    expect(fixture.backend.index).toHaveBeenLastCalledWith(expect.not.objectContaining({ rebuild: true, changedPaths: expect.anything() }))
+
+    fixture.runtime.rebuild(WORKSPACE)
+    await vi.advanceTimersByTimeAsync(25)
+    expect(fixture.backend.index).toHaveBeenLastCalledWith(expect.objectContaining({ resetPaths: true, rebuild: true }))
+  })
+
+  it('treats reconcile and rebuild of an inactive workspace as no-ops', () => {
+    const fixture = harness()
+    expect(() => fixture.runtime.reconcile(WORKSPACE)).not.toThrow()
+    expect(() => fixture.runtime.rebuild(WORKSPACE)).not.toThrow()
+    expect(fixture.backend.index).not.toHaveBeenCalled()
+  })
+
+  it('drops the index storage but keeps config.json, then deactivates', async () => {
+    const root = join(tmpdir(), `dsh-zvec-drop-test-${process.pid}`)
+    rmSync(root, { recursive: true, force: true })
+    mkdirSync(join(root, INDEX_DIR_NAME), { recursive: true })
+    writeFileSync(join(root, INDEX_DIR_NAME, 'manifest.json'), '{}', 'utf8')
+    writeFileSync(join(root, INDEX_DIR_NAME, 'files.zvec'), 'x', 'utf8')
+    writeFileSync(join(root, INDEX_DIR_NAME, 'config.json'), '{"enabled":true}', 'utf8')
+    const fixture = harness()
+    try {
+      fixture.runtime.activate(root)
+      await fixture.runtime.settled(root)
+
+      await fixture.runtime.drop(root)
+
+      expect(fixture.runtime.status()).toEqual([])
+      expect(existsSync(join(root, INDEX_DIR_NAME, 'config.json'))).toBe(true)
+      expect(existsSync(join(root, INDEX_DIR_NAME, 'manifest.json'))).toBe(false)
+      expect(existsSync(join(root, INDEX_DIR_NAME, 'files.zvec'))).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
 })
+
+function backend_scope_index(fixture: { backend: SearchEngine }): unknown {
+  return vi.mocked(fixture.backend.index).mock.calls.at(-1)?.[0]
+}

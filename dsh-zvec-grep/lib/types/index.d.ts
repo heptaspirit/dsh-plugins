@@ -19,6 +19,6 @@ export interface Config {
     statusPollIntervalMs?: number;
 }
 export declare const Config: z<Config>;
-export declare function mountPlugin(ctx: Context, runtime: WorkspaceSearchRuntime, config: SearchToolConfig): void;
+export declare function mountPlugin(ctx: Context, runtime: WorkspaceSearchRuntime, config: SearchToolConfig, isEnabled: (root: string) => boolean): void;
 export declare function apply(ctx: Context, config: Config): void;
 //# sourceMappingURL=index.d.ts.map

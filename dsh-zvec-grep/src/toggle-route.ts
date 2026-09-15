@@ -1,5 +1,5 @@
 import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
-import { canonicalizeRoot, writeWorkspaceConfig } from './config-file.ts'
+import { canonicalizeRoot, updateWorkspaceConfig } from './config-file.ts'
 import type { WorkspaceSearchRuntime } from './runtime.ts'
 
 /** Exact Fetch route the status pill uses to toggle a workspace on or off. */
@@ -36,7 +36,8 @@ async function applyToggle(deps: ToggleRouteDeps, payload: { root: unknown; enab
   if (!knownRoots.has(root)) {
     return { ok: false, error: { code: 'not_found', message: `Workspace is not known to this Harness process: ${root}`, details: {} } }
   }
-  writeWorkspaceConfig(root, parsed.enabled)
+  // updateWorkspaceConfig keeps an existing scope intact; writing {enabled} alone would drop it.
+  updateWorkspaceConfig(root, { enabled: parsed.enabled })
   if (parsed.enabled) {
     // Re-indexing starts in the background; the pill reads the state route right after.
     void deps.runtime.activate(root).catch(() => undefined)
