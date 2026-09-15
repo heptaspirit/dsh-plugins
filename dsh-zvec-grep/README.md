@@ -55,6 +55,8 @@ To turn a workspace on, either:
 - select the **Zvec index** pill in that workspace and choose **Enable indexing** (the toggle writes the configuration and starts indexing immediately), or
 - create `<workspace>/.zvec-grep/config.json` containing `{"enabled": true}` and start a new search.
 
+If the pill's Enable/Disable control reports an error, the toggle channel is unavailable in that Harness build; edit `config.json` by hand instead - it is the same file the button writes, and the change takes effect on the next search or session start.
+
 State persists as plain files under `.zvec-grep/`, evaluated in this order:
 
 1. `config.json` with a boolean `enabled` field is authoritative - a workspace disabled here stays off across plugin and engine upgrades.
@@ -112,7 +114,7 @@ Node.js 22 or newer is required. `engineModule` accepts a package specifier, an 
 
 ### excludePaths
 
-`excludePaths` lists workspace-relative paths or glob patterns the engine must never index or search. Entries are matched against paths relative to the workspace root; a bare directory name excludes the whole subtree. The filter is applied to the initial index, every incremental update and reconciliation, and searches (including the rg fallback, which reads it from the call options rather than the persisted manifest).
+`excludePaths` lists workspace-relative paths or glob patterns the engine must never index or search. Entries are matched against paths relative to the workspace root: a bare directory name matches only a directory at the workspace root (`secret` excludes `secret/**`), so nested directories need their own prefix - e.g. `src/vendor/**` or `docs/generated/**`. The filter is applied to the initial index, every incremental update and reconciliation, and searches (including the rg fallback, which reads it from the call options rather than the persisted manifest).
 
 ```yaml
 config:
