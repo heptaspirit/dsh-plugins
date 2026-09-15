@@ -44,7 +44,9 @@ When Harness creates or resumes a session, the plugin reads the workspace from t
 
 Added, changed, and deleted paths are debounced and submitted to zvec-grep's incremental index API in the background. An hourly full reconciliation repairs drift if the operating-system watcher missed an event.
 
-The Harness workspace also gets a **Zvec index** status pill. It reports `Indexing`, `Refreshing`, `Ready`, `Error`, or `Off` without blocking search. Select the pill to see the active workspace, the pending change count, and the enable/disable control. The UI is installed with the plugin; there is no separate frontend setup.
+The Harness workspace also gets a **Zvec index** status pill. It reports `Indexing`, `Refreshing`, `Ready`, `Error`, or `Off` without blocking search. Select the pill to see the active workspace and the pending change count; the pill is read-only - enablement and scope live in the settings page. The UI is installed with the plugin; there is no separate frontend setup.
+
+The settings **Plugins** page has a **Zvec Search** card listing every workspace known to the session, each with an indexing switch and an excluded-directories editor (entries match the `excludePaths` rules below). Advanced scope fields (globs, file types, depth limits, ...) stay agent-managed through `zvec_manage`; card edits merge into the persisted scope, so they never erase agent-set fields. The list follows live sessions: right after a restart only the restored session's workspace is listed, and the others appear as you open them - each workspace's enablement persists in its own `.zvec-grep/config.json` regardless.
 
 ## Enabling a workspace
 
@@ -52,10 +54,10 @@ Indexing is **opt-in per workspace**. A workspace with no configuration and no p
 
 To turn a workspace on, either:
 
-- select the **Zvec index** pill in that workspace and choose **Enable indexing** (the toggle writes the configuration and starts indexing immediately), or
+- open the settings page's **Zvec Search** section and flip the workspace's switch (the toggle writes the configuration and starts indexing immediately), or
 - create `<workspace>/.zvec-grep/config.json` containing `{"enabled": true}` and start a new search.
 
-If the pill's Enable/Disable control reports an error, the toggle channel is unavailable in that Harness build; edit `config.json` by hand instead - it is the same file the button writes, and the change takes effect on the next search or session start.
+If the switch reports an error, the toggle channel is unavailable in that Harness build; edit `config.json` by hand instead - it is the same file the switch writes, and the change takes effect on the next search or session start.
 
 State persists as plain files under `.zvec-grep/`, evaluated in this order:
 

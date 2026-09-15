@@ -1,4 +1,5 @@
 import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
+import { readWorkspaceConfig } from './config-file.ts'
 import type { WorkspaceSearchRuntime } from './runtime.ts'
 
 export const STATUS_PATH = '/api/dsh-zvec-grep/status'
@@ -15,12 +16,19 @@ export const STATUS_PATH = '/api/dsh-zvec-grep/status'
  * `Request with GET/HEAD method cannot have body`, surfaced to the client as a bare 400 on every
  * poll. The host's own GET routes set the same mode for the same reason.
  */
+export interface EngineStatus {
+  available: boolean
+  /** Resolution failure detail (the EngineUnavailableError message); present when unavailable. */
+  detail?: string
+}
+
 export function registerStatusRoute(
   connection: HostConnectionFetch,
   runtime: Pick<WorkspaceSearchRuntime, 'statusFor'>,
   sessions: { list(): Array<{ id: string; header: { cwd?: string } }> },
   pollIntervalMs: number,
   isEnabled: (root: string) => boolean,
+  getEngine?: () => Promise<EngineStatus>,
 ): () => void {
   const route: Parameters<HostConnectionFetch['register']>[0] & { requestBody?: 'buffered' | 'streaming' } = {
     path: STATUS_PATH,
@@ -31,9 +39,14 @@ export function registerStatusRoute(
         .map(item => item.header.cwd)
         .filter((cwd): cwd is string => typeof cwd === 'string' && cwd.length > 0))]
       if (roots.length === 0) return new Response('not found', { status: 404 })
+      // Engine install state rides the same poll so the settings card can hint at the
+      // optional engine without a second route; the loader caches its own resolution.
+      const engine = getEngine === undefined ? undefined : await getEngine().catch(() => ({ available: false }) satisfies EngineStatus)
       const workspaces = roots.map(root => {
+        const config = readWorkspaceConfig(root)
+        const shared = { enabled: isEnabled(root), scope: config?.scope ?? null }
         if (!isEnabled(root)) {
-          return { root, status: 'disabled' as const, pendingChanges: 0, updatedAt: 0 }
+          return { root, status: 'disabled' as const, pendingChanges: 0, updatedAt: 0, ...shared }
         }
         const internal = runtime.statusFor(root)
         return internal === undefined ? {
@@ -41,17 +54,20 @@ export function registerStatusRoute(
           status: 'indexing',
           pendingChanges: 0,
           updatedAt: 0,
+          ...shared,
         } : {
           root,
           status: internal.status,
           pendingChanges: internal.pendingChanges,
           updatedAt: internal.updatedAt,
           ...(internal.status === 'error' ? { errorCode: 'index_failed' } : {}),
+          ...shared,
         }
       })
       return new Response(JSON.stringify({
-        version: 3,
+        version: 4,
         pollIntervalMs,
+        ...(engine === undefined ? {} : { engine }),
         workspaces,
       }), { status: 200, headers: {
         'content-type': 'application/json; charset=utf-8',

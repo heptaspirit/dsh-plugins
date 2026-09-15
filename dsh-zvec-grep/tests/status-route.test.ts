@@ -26,11 +26,11 @@ describe('status route', () => {
     expect(route.requestBody).toBe('buffered')
     expect(response.headers.get('cache-control')).toBe('no-store')
     expect(await response.json()).toEqual({
-      version: 3,
+      version: 4,
       pollIntervalMs: 2000,
       workspaces: [
-        { root: '/repo', status: 'ready', pendingChanges: 0, updatedAt: 42 },
-        { root: '/other', status: 'indexing', pendingChanges: 0, updatedAt: 0 },
+        { root: '/repo', status: 'ready', pendingChanges: 0, updatedAt: 42, enabled: true, scope: null },
+        { root: '/other', status: 'indexing', pendingChanges: 0, updatedAt: 0, enabled: true, scope: null },
       ],
     })
     expect(dispose).toBeTypeOf('function')
@@ -43,9 +43,9 @@ describe('status route', () => {
     registerStatusRoute({ register } as never, runtime as never, { list: () => [{ id: 'a', header: { cwd: '/repo' } }] }, 2000, root => root !== '/repo')
 
     expect(await (await route.fetch(new Request('http://localhost/api/dsh-zvec-grep/status'))).json()).toEqual({
-      version: 3,
+      version: 4,
       pollIntervalMs: 2000,
-      workspaces: [{ root: '/repo', status: 'disabled', pendingChanges: 0, updatedAt: 0 }],
+      workspaces: [{ root: '/repo', status: 'disabled', pendingChanges: 0, updatedAt: 0, enabled: false, scope: null }],
     })
   })
 
@@ -61,7 +61,7 @@ describe('status route', () => {
     )
 
     expect((await (await route.fetch(new Request('http://localhost/api/dsh-zvec-grep/status'))).json()).workspaces)
-      .toEqual([{ root: '/repo', status: 'indexing', pendingChanges: 0, updatedAt: 0 }])
+      .toEqual([{ root: '/repo', status: 'indexing', pendingChanges: 0, updatedAt: 0, enabled: true, scope: null }])
   })
 
   it('requires at least one session with a workspace', async () => {
@@ -83,9 +83,9 @@ describe('status route', () => {
     const payload = await (await route.fetch(new Request('http://localhost/api/dsh-zvec-grep/status'))).json()
 
     expect(payload).toEqual({
-      version: 3,
+      version: 4,
       pollIntervalMs: 2000,
-      workspaces: [{ root: '/repo', status: 'error', pendingChanges: 0, updatedAt: 42, errorCode: 'index_failed' }],
+      workspaces: [{ root: '/repo', status: 'error', pendingChanges: 0, updatedAt: 42, errorCode: 'index_failed', enabled: true, scope: null }],
     })
     expect(JSON.stringify(payload)).not.toContain('/secret failed')
   })

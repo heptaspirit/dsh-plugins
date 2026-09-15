@@ -8,6 +8,10 @@ export interface WorkspaceIndexStatus {
 }
 export interface WorkspaceStatus extends WorkspaceIndexStatus {
     root: string;
+    /** Present from status payload v4: the workspace's enablement per the config rules. */
+    enabled?: boolean;
+    /** Present from status payload v4: the persisted scope, `null` when unset. */
+    scope?: Record<string, unknown> | null;
 }
 export interface IndexStatusSnapshot {
     connection: 'loading' | 'ready' | 'error';
@@ -34,8 +38,9 @@ export declare class IndexStatusSource implements HostObservable<IndexStatusSnap
     private poll;
     private publish;
 }
-export type ToggleOutcome = {
+export type ActionOutcome<T = unknown> = {
     ok: true;
+    value: T;
 } | {
     ok: false;
     message: string;
@@ -45,6 +50,18 @@ export type ToggleOutcome = {
  * Exact routes only accept GET/HEAD, so the toggle is a GET with query parameters; browser
  * authentication and the origin fence apply like on every /api request.
  */
-export declare function requestWorkspaceToggle(root: string, enabled: boolean): Promise<ToggleOutcome>;
+export declare function requestWorkspaceToggle(root: string, enabled: boolean): Promise<ActionOutcome<{
+    root: string;
+    enabled: boolean;
+}>>;
+/**
+ * Saves one workspace's index scope as a JSON document. An empty object (`{}`) clears the
+ * scope, falling the workspace back to the plugin-global defaults; any invalid field inside
+ * the document is dropped server-side.
+ */
+export declare function requestScopeSave(root: string, scopeJson: string): Promise<ActionOutcome<{
+    root: string;
+    scope: Record<string, unknown> | null;
+}>>;
 export {};
 //# sourceMappingURL=status-source.d.ts.map

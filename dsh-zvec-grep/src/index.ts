@@ -2,6 +2,17 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import z from '@deepseek-ai/schemastery'
+
+// Minimal face of the host settings service (dsh-settings is not a dependency; the real
+// service exists in the host process). Only the namespace registration the settings card
+// needs is declared.
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    settings: {
+      register(ns: string, schema: unknown, options?: unknown): unknown
+    }
+  }
+}
 import { DEFAULT_ENGINE_MODULE, EngineLoader } from './engine.ts'
 import { readWorkspaceConfig, resolveEnabled } from './config-file.ts'
 import { WorkspaceSearchRuntime } from './runtime.ts'
@@ -10,6 +21,7 @@ import { createManageTool } from './manage-tool.ts'
 import { createWorkspaceWatcher } from './watcher.ts'
 import { registerStatusRoute } from './status-route.ts'
 import { registerToggleRoute } from './toggle-route.ts'
+import { registerScopeRoute } from './scope-route.ts'
 
 export const name = 'dsh-zvec-grep'
 export const inject = ['sessions', 'tools', 'systemPrompt']
@@ -94,7 +106,10 @@ export function apply(ctx: Context, config: Config): void {
   // even if the experimental toggle channel fails.
   const statusFiber = ctx.inject(['connection'], childCtx => {
     childCtx.effect(
-      () => registerStatusRoute(childCtx.connection.fetch, runtime, childCtx.sessions, config.statusPollIntervalMs ?? 2_000, isEnabled),
+      () => registerStatusRoute(childCtx.connection.fetch, runtime, childCtx.sessions, config.statusPollIntervalMs ?? 2_000, isEnabled, () => engines.load().then(
+        () => ({ available: true }),
+        error => ({ available: false, detail: error instanceof Error ? error.message : String(error) }),
+      )),
       'dsh-zvec-grep: status route',
     )
   })
@@ -111,8 +126,37 @@ export function apply(ctx: Context, config: Config): void {
       }
     }, 'dsh-zvec-grep: workspace toggle route')
   })
+  // The scope route (settings page) rides the same registry and gets the same isolation
+  // and the same manual fallback as the toggle route above.
+  const scopeFiber = ctx.inject(['connection'], childCtx => {
+    childCtx.effect(() => {
+      try {
+        return registerScopeRoute(childCtx.connection.fetch, { runtime, sessions: childCtx.sessions })
+      } catch (error) {
+        console.warn('[dsh-zvec-grep] workspace scope route unavailable, scope editing falls back to editing .zvec-grep/config.json:', error)
+        return () => {}
+      }
+    }, 'dsh-zvec-grep: workspace scope route')
+  })
+  // The settings Plugins page dispatches its cards per SERVED settings namespace (host
+  // describe document); without a registered namespace our client card is never dispatched.
+  // The card keeps its state in <workspace>/.zvec-grep/config.json and talks to the plugin's
+  // own routes, so the document only needs the namespace to exist - an empty schema claims
+  // it. Isolated and caught: a registration clash degrades to no card, never a broken plugin.
+  const settingsFiber = ctx.inject(['settings'], childCtx => {
+    childCtx.effect(() => {
+      try {
+        childCtx.settings.register('zvec-grep', z.object({}))
+      } catch (error) {
+        console.warn('[dsh-zvec-grep] settings namespace unavailable, the settings card will not appear:', error)
+      }
+      return () => {}
+    }, 'dsh-zvec-grep: settings namespace')
+  })
   ctx.effect(() => () => {
     statusFiber.dispose()
     toggleFiber.dispose()
+    scopeFiber.dispose()
+    settingsFiber.dispose()
   }, 'dsh-zvec-grep: optional web status')
 }

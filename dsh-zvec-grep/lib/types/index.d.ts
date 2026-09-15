@@ -1,5 +1,12 @@
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
+declare module '@deepseek-ai/cordis' {
+    interface Context {
+        settings: {
+            register(ns: string, schema: unknown, options?: unknown): unknown;
+        };
+    }
+}
 import { WorkspaceSearchRuntime } from './runtime.ts';
 import { type SearchToolConfig } from './tool.ts';
 export declare const name = "dsh-zvec-grep";

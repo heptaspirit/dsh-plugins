@@ -11,6 +11,10 @@ export interface WorkspaceIndexStatus {
 
 export interface WorkspaceStatus extends WorkspaceIndexStatus {
   root: string
+  /** Present from status payload v4: the workspace's enablement per the config rules. */
+  enabled?: boolean
+  /** Present from status payload v4: the persisted scope, `null` when unset. */
+  scope?: Record<string, unknown> | null
 }
 
 export interface IndexStatusSnapshot {
@@ -23,6 +27,7 @@ type FetchStatus = () => Promise<Response>
 
 const STATUS_PATH = '/api/dsh-zvec-grep/status'
 const TOGGLE_PATH = '/api/dsh-zvec-grep/toggle-workspace'
+const SCOPE_PATH = '/api/dsh-zvec-grep/scope'
 const ERROR_RETRY_MS = 5000
 const MISSING_WORKSPACE_RETRY_MS = 250
 
@@ -43,13 +48,15 @@ function parseWorkspace(value: unknown): WorkspaceStatus | undefined {
     pendingChanges: item.pendingChanges,
     updatedAt: item.updatedAt,
     ...(item.errorCode === 'index_failed' ? { errorCode: 'index_failed' as const } : {}),
+    ...(typeof item.enabled === 'boolean' ? { enabled: item.enabled } : {}),
+    ...(item.scope === null || (typeof item.scope === 'object' && !Array.isArray(item.scope)) ? { scope: item.scope as Record<string, unknown> | null } : {}),
   })
 }
 
 function parsePayload(value: unknown): { pollIntervalMs: number; workspaces: WorkspaceStatus[] } {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('Invalid zvec status response')
   const payload = value as Record<string, unknown>
-  if (payload.version !== 3 || typeof payload.pollIntervalMs !== 'number' || !Array.isArray(payload.workspaces)) {
+  if (payload.version !== 4 || typeof payload.pollIntervalMs !== 'number' || !Array.isArray(payload.workspaces)) {
     throw new Error('Invalid zvec status response')
   }
   const workspaces = payload.workspaces.map(parseWorkspace)
@@ -150,14 +157,33 @@ export class IndexStatusSource implements HostObservable<IndexStatusSnapshot> {
   }
 }
 
-export type ToggleOutcome = { ok: true } | { ok: false; message: string }
+export type ActionOutcome<T = unknown> = { ok: true; value: T } | { ok: false; message: string }
+
+/** Unwraps the `{ result: { ok, value | error } }` envelope every exact route answers with. */
+async function unwrapRoute(response: Response, what: string): Promise<ActionOutcome> {
+  if (!response.ok) return { ok: false, message: `${what} request failed (${response.status})` }
+  let envelope: unknown
+  try {
+    envelope = await response.json()
+  } catch {
+    return { ok: false, message: `${what} response was not JSON` }
+  }
+  const result = (typeof envelope === 'object' && envelope !== null && !Array.isArray(envelope)
+    ? (envelope as Record<string, unknown>)['result']
+    : undefined) as { ok?: boolean; value?: unknown; error?: { message?: string } } | undefined
+  if (typeof result !== 'object' || result === null || typeof result.ok !== 'boolean') {
+    return { ok: false, message: `Malformed ${what.toLowerCase()} response` }
+  }
+  if (result.ok) return { ok: true, value: result.value }
+  return { ok: false, message: result.error?.message ?? `${what} failed` }
+}
 
 /**
  * Toggles one workspace through the plugin's exact Fetch route on the shared /api channel.
  * Exact routes only accept GET/HEAD, so the toggle is a GET with query parameters; browser
  * authentication and the origin fence apply like on every /api request.
  */
-export async function requestWorkspaceToggle(root: string, enabled: boolean): Promise<ToggleOutcome> {
+export async function requestWorkspaceToggle(root: string, enabled: boolean): Promise<ActionOutcome<{ root: string; enabled: boolean }>> {
   let response: Response
   try {
     const url = `${TOGGLE_PATH}?root=${encodeURIComponent(root)}&enabled=${enabled}`
@@ -165,19 +191,21 @@ export async function requestWorkspaceToggle(root: string, enabled: boolean): Pr
   } catch (error) {
     return { ok: false, message: error instanceof Error ? error.message : String(error) }
   }
-  if (!response.ok) return { ok: false, message: `Toggle request failed (${response.status})` }
-  let envelope: unknown
+  return unwrapRoute(response, 'Toggle') as Promise<ActionOutcome<{ root: string; enabled: boolean }>>
+}
+
+/**
+ * Saves one workspace's index scope as a JSON document. An empty object (`{}`) clears the
+ * scope, falling the workspace back to the plugin-global defaults; any invalid field inside
+ * the document is dropped server-side.
+ */
+export async function requestScopeSave(root: string, scopeJson: string): Promise<ActionOutcome<{ root: string; scope: Record<string, unknown> | null }>> {
+  let response: Response
   try {
-    envelope = await response.json()
-  } catch {
-    return { ok: false, message: 'Toggle response was not JSON' }
+    const url = `${SCOPE_PATH}?root=${encodeURIComponent(root)}&scope=${encodeURIComponent(scopeJson)}`
+    response = await fetch(url)
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) }
   }
-  const result = (typeof envelope === 'object' && envelope !== null && !Array.isArray(envelope)
-    ? (envelope as Record<string, unknown>)['result']
-    : undefined) as { ok?: boolean; error?: { message?: string } } | undefined
-  if (typeof result !== 'object' || result === null || typeof result.ok !== 'boolean') {
-    return { ok: false, message: 'Malformed toggle response' }
-  }
-  if (result.ok) return { ok: true }
-  return { ok: false, message: result.error?.message ?? 'Toggle failed' }
+  return unwrapRoute(response, 'Scope') as Promise<ActionOutcome<{ root: string; scope: Record<string, unknown> | null }>>
 }

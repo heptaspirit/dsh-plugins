@@ -1,0 +1,5 @@
+# codegraph local symbol index
+.codegraph/
+
+# local npm pack artifacts (release verification only)
+*.tgz

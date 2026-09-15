@@ -13,6 +13,11 @@ export declare const STATUS_PATH = "/api/dsh-zvec-grep/status";
  * `Request with GET/HEAD method cannot have body`, surfaced to the client as a bare 400 on every
  * poll. The host's own GET routes set the same mode for the same reason.
  */
+export interface EngineStatus {
+    available: boolean;
+    /** Resolution failure detail (the EngineUnavailableError message); present when unavailable. */
+    detail?: string;
+}
 export declare function registerStatusRoute(connection: HostConnectionFetch, runtime: Pick<WorkspaceSearchRuntime, 'statusFor'>, sessions: {
     list(): Array<{
         id: string;
@@ -20,5 +25,5 @@ export declare function registerStatusRoute(connection: HostConnectionFetch, run
             cwd?: string;
         };
     }>;
-}, pollIntervalMs: number, isEnabled: (root: string) => boolean): () => void;
+}, pollIntervalMs: number, isEnabled: (root: string) => boolean, getEngine?: () => Promise<EngineStatus>): () => void;
 //# sourceMappingURL=status-route.d.ts.map

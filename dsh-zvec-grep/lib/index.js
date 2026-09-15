@@ -945,19 +945,7 @@ function createWorkspaceWatcher(root, callbacks) {
 //#endregion
 //#region src/status-route.ts
 const STATUS_PATH = "/api/dsh-zvec-grep/status";
-/**
-* Report every workspace the host currently knows, keyed by the session cwd the runtime was
-* activated with. A plain HTTP route carries no calling session, so instead of asking the caller
-* who it is, the route publishes every workspace and the client selects its own cwd from the list.
-*
-* `requestBody: 'buffered'` is load-bearing, not cosmetic: the host bridges an incoming request
-* into a WHATWG Request, and only the 'buffered' mode leaves a body-less GET alone. Any other
-* value - including the omitted field - takes the streaming branch, which always attaches
-* `body: Readable.toWeb(req)` and makes `new Request()` throw
-* `Request with GET/HEAD method cannot have body`, surfaced to the client as a bare 400 on every
-* poll. The host's own GET routes set the same mode for the same reason.
-*/
-function registerStatusRoute(connection, runtime, sessions, pollIntervalMs, isEnabled) {
+function registerStatusRoute(connection, runtime, sessions, pollIntervalMs, isEnabled, getEngine) {
 	const route = {
 		path: STATUS_PATH,
 		methods: ["GET"],
@@ -965,30 +953,40 @@ function registerStatusRoute(connection, runtime, sessions, pollIntervalMs, isEn
 		async fetch() {
 			const roots = [...new Set(sessions.list().map((item) => item.header.cwd).filter((cwd) => typeof cwd === "string" && cwd.length > 0))];
 			if (roots.length === 0) return new Response("not found", { status: 404 });
+			const engine = getEngine === void 0 ? void 0 : await getEngine().catch(() => ({ available: false }));
 			const workspaces = roots.map((root) => {
+				const config = readWorkspaceConfig(root);
+				const shared = {
+					enabled: isEnabled(root),
+					scope: config?.scope ?? null
+				};
 				if (!isEnabled(root)) return {
 					root,
 					status: "disabled",
 					pendingChanges: 0,
-					updatedAt: 0
+					updatedAt: 0,
+					...shared
 				};
 				const internal = runtime.statusFor(root);
 				return internal === void 0 ? {
 					root,
 					status: "indexing",
 					pendingChanges: 0,
-					updatedAt: 0
+					updatedAt: 0,
+					...shared
 				} : {
 					root,
 					status: internal.status,
 					pendingChanges: internal.pendingChanges,
 					updatedAt: internal.updatedAt,
-					...internal.status === "error" ? { errorCode: "index_failed" } : {}
+					...internal.status === "error" ? { errorCode: "index_failed" } : {},
+					...shared
 				};
 			});
 			return new Response(JSON.stringify({
-				version: 3,
+				version: 4,
 				pollIntervalMs,
+				...engine === void 0 ? {} : { engine },
 				workspaces
 			}), {
 				status: 200,
@@ -1069,9 +1067,10 @@ async function applyToggle(deps, payload) {
 * the browser must never be able to write a config file to an arbitrary path.
 */
 function registerToggleRoute(fetchRegistry, deps) {
-	return fetchRegistry.register({
+	const route = {
 		path: TOGGLE_PATH,
 		methods: ["GET"],
+		requestBody: "buffered",
 		fetch: async (request) => {
 			const url = new URL(request.url);
 			const enabledRaw = url.searchParams.get("enabled");
@@ -1081,7 +1080,95 @@ function registerToggleRoute(fetchRegistry, deps) {
 			});
 			return Response.json({ result });
 		}
-	});
+	};
+	return fetchRegistry.register(route);
+}
+
+//#endregion
+//#region src/scope-route.ts
+/** Exact Fetch route the settings page uses to read and write a workspace's index scope. */
+const SCOPE_PATH = "/api/dsh-zvec-grep/scope";
+function resolveRoot(deps, rawRoot) {
+	if (typeof rawRoot !== "string" || rawRoot.length === 0) return {
+		ok: false,
+		code: "bad_request",
+		message: "Scope requires a non-empty root parameter"
+	};
+	const root = canonicalizeRoot(rawRoot);
+	if (!new Set(deps.sessions.list().map((item) => item.header.cwd).filter((cwd) => typeof cwd === "string" && cwd.length > 0).map(canonicalizeRoot)).has(root)) return {
+		ok: false,
+		code: "not_found",
+		message: `Workspace is not known to this Harness process: ${root}`
+	};
+	return {
+		ok: true,
+		root
+	};
+}
+/**
+* GET without a `scope` parameter reads the persisted scope; GET with one writes it.
+* A scope document with no valid field clears the scope entirely, which the settings
+* page uses as its "reset to defaults" action. Writing queues a reconcile (rescan
+* without re-embedding) so the change takes effect on the next index pass.
+*/
+async function applyScope(deps, url) {
+	const root = resolveRoot(deps, url.searchParams.get("root") ?? void 0);
+	if (!root.ok) return {
+		ok: false,
+		error: {
+			code: root.code,
+			message: root.message,
+			details: {}
+		}
+	};
+	const raw = url.searchParams.get("scope");
+	if (raw === null) return {
+		ok: true,
+		value: {
+			root: root.root,
+			scope: readWorkspaceConfig(root.root)?.scope ?? null
+		}
+	};
+	let parsed;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return {
+			ok: false,
+			error: {
+				code: "bad_request",
+				message: "Scope is not valid JSON",
+				details: {}
+			}
+		};
+	}
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {
+		ok: false,
+		error: {
+			code: "bad_request",
+			message: "Scope must be a JSON object",
+			details: {}
+		}
+	};
+	const scope = sanitizeScope(parsed);
+	const next = updateWorkspaceConfig(root.root, { scope });
+	deps.runtime.reconcile(root.root);
+	return {
+		ok: true,
+		value: {
+			root: root.root,
+			scope: next.scope ?? null
+		}
+	};
+}
+function registerScopeRoute(fetchRegistry, deps) {
+	const route = {
+		path: SCOPE_PATH,
+		methods: ["GET"],
+		requestBody: "buffered",
+		fetch: async (request) => Response.json({ result: await applyScope(deps, new URL(request.url)) })
+	};
+	return fetchRegistry.register(route);
 }
 
 //#endregion
@@ -1160,7 +1247,10 @@ function apply(ctx, config) {
 		maxLimit: config.maxLimit ?? 30
 	}, isEnabled);
 	const statusFiber = ctx.inject(["connection"], (childCtx) => {
-		childCtx.effect(() => registerStatusRoute(childCtx.connection.fetch, runtime, childCtx.sessions, config.statusPollIntervalMs ?? 2e3, isEnabled), "dsh-zvec-grep: status route");
+		childCtx.effect(() => registerStatusRoute(childCtx.connection.fetch, runtime, childCtx.sessions, config.statusPollIntervalMs ?? 2e3, isEnabled, () => engines.load().then(() => ({ available: true }), (error) => ({
+			available: false,
+			detail: error instanceof Error ? error.message : String(error)
+		}))), "dsh-zvec-grep: status route");
 	});
 	const toggleFiber = ctx.inject(["connection"], (childCtx) => {
 		childCtx.effect(() => {
@@ -1175,9 +1265,34 @@ function apply(ctx, config) {
 			}
 		}, "dsh-zvec-grep: workspace toggle route");
 	});
+	const scopeFiber = ctx.inject(["connection"], (childCtx) => {
+		childCtx.effect(() => {
+			try {
+				return registerScopeRoute(childCtx.connection.fetch, {
+					runtime,
+					sessions: childCtx.sessions
+				});
+			} catch (error) {
+				console.warn("[dsh-zvec-grep] workspace scope route unavailable, scope editing falls back to editing .zvec-grep/config.json:", error);
+				return () => {};
+			}
+		}, "dsh-zvec-grep: workspace scope route");
+	});
+	const settingsFiber = ctx.inject(["settings"], (childCtx) => {
+		childCtx.effect(() => {
+			try {
+				childCtx.settings.register("zvec-grep", z.object({}));
+			} catch (error) {
+				console.warn("[dsh-zvec-grep] settings namespace unavailable, the settings card will not appear:", error);
+			}
+			return () => {};
+		}, "dsh-zvec-grep: settings namespace");
+	});
 	ctx.effect(() => () => {
 		statusFiber.dispose();
 		toggleFiber.dispose();
+		scopeFiber.dispose();
+		settingsFiber.dispose();
 	}, "dsh-zvec-grep: optional web status");
 }
 

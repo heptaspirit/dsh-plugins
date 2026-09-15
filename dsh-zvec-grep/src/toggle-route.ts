@@ -64,9 +64,12 @@ async function applyToggle(deps: ToggleRouteDeps, payload: { root: unknown; enab
  * the browser must never be able to write a config file to an arbitrary path.
  */
 export function registerToggleRoute(fetchRegistry: HostConnectionFetch, deps: ToggleRouteDeps): () => Promise<void> {
-  return fetchRegistry.register({
+  const route: Parameters<HostConnectionFetch['register']>[0] & { requestBody?: 'buffered' | 'streaming' } = {
     path: TOGGLE_PATH,
     methods: ['GET'],
+    // Load-bearing, same as the status route: without 'buffered' the host bridge attaches a
+    // streaming body to the GET and `new Request()` throws -> a bare 400 on every toggle.
+    requestBody: 'buffered',
     fetch: async (request) => {
       const url = new URL(request.url)
       const enabledRaw = url.searchParams.get('enabled')
@@ -76,5 +79,6 @@ export function registerToggleRoute(fetchRegistry: HostConnectionFetch, deps: To
       })
       return Response.json({ result })
     },
-  })
+  }
+  return fetchRegistry.register(route)
 }

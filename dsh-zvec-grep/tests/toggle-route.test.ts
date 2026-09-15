@@ -17,6 +17,7 @@ function workspace(name: string): string {
 interface RegisteredRoute {
   path: string
   methods: readonly string[]
+  requestBody?: 'buffered' | 'streaming'
   fetch: (request: Request) => Promise<Response>
 }
 
@@ -25,8 +26,13 @@ function routeFetcher(deps: Parameters<typeof registerToggleRoute>[1]) {
   registerToggleRoute({ register } as never, deps)
   expect(register).toHaveBeenCalledWith(expect.objectContaining({ path: TOGGLE_PATH, methods: ['GET'] }))
   const route = register.mock.calls[0]![0] as RegisteredRoute
+  // Load-bearing: without 'buffered' the host bridge attaches a streaming body to the GET
+  // and every toggle 400s at the bridge. The unit harness bypasses that bridge, so pin the
+  // flag itself.
+  expect(route.requestBody).toBe('buffered')
+  const scopedRoute = route as typeof route & { fetch: RegisteredRoute['fetch'] }
   return async (query: string) => {
-    const response = await route.fetch(new Request(`http://localhost${TOGGLE_PATH}${query}`))
+    const response = await scopedRoute.fetch(new Request(`http://localhost${TOGGLE_PATH}${query}`))
     return { status: response.status, body: (await response.json()) as { result: { ok: boolean; error?: { message?: string } } } }
   }
 }

@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { IndexStatusSource } from '../src/client/status-source.ts'
+import { IndexStatusSource, requestScopeSave, requestWorkspaceToggle } from '../src/client/status-source.ts'
 
 afterEach(() => vi.useRealTimers())
 
 function payload(workspaces: unknown[], pollIntervalMs = 750): Response {
-  return new Response(JSON.stringify({ version: 3, pollIntervalMs, workspaces }), {
+  return new Response(JSON.stringify({ version: 4, pollIntervalMs, workspaces }), {
     status: 200,
     headers: { 'content-type': 'application/json' },
   })
@@ -154,10 +154,10 @@ describe('IndexStatusSource', () => {
     }
   })
 
-  it('accepts a disabled workspace phase from the version 3 payload', async () => {
+  it('accepts a disabled workspace phase and enablement/scope fields from the v4 payload', async () => {
     vi.useFakeTimers()
     const source = new IndexStatusSource(vi.fn(async () => payload([
-      { root: '/repo', status: 'disabled', pendingChanges: 0, updatedAt: 0 },
+      { root: '/repo', status: 'disabled', pendingChanges: 0, updatedAt: 0, enabled: false, scope: { excludePaths: ['dist'] } },
     ])))
     source.selectWorkspace('/repo')
     source.start()
@@ -165,14 +165,19 @@ describe('IndexStatusSource', () => {
 
     expect(source.getSnapshot()).toEqual(expect.objectContaining({
       connection: 'ready',
-      status: expect.objectContaining({ root: '/repo', status: 'disabled' }),
+      status: expect.objectContaining({
+        root: '/repo',
+        status: 'disabled',
+        enabled: false,
+        scope: { excludePaths: ['dist'] },
+      }),
     }))
     source.stop()
   })
 
-  it('rejects an older payload version instead of misparsing it', async () => {
+  it('rejects the previous payload version (3) instead of misparsing it', async () => {
     vi.useFakeTimers()
-    const stale = new Response(JSON.stringify({ version: 2, pollIntervalMs: 750, workspaces: [] }), {
+    const stale = new Response(JSON.stringify({ version: 3, pollIntervalMs: 750, workspaces: [] }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
     })
@@ -204,5 +209,57 @@ describe('IndexStatusSource', () => {
       status: expect.objectContaining({ status: 'disabled' }),
     }))
     source.stop()
+  })
+})
+
+describe('request helpers', () => {
+  function envelope(result: unknown, status = 200): Response {
+    return new Response(JSON.stringify(result), { status, headers: { 'content-type': 'application/json' } })
+  }
+
+  function withFetch(impl: (input: string) => Response): { restore: () => void; calls: Array<string> } {
+    const calls: Array<string> = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (input: unknown) => {
+      calls.push(String(input))
+      return impl(String(input))
+    }) as typeof fetch
+    return { calls, restore: () => { globalThis.fetch = originalFetch } }
+  }
+
+  it('requestWorkspaceToggle sends a GET with root and enabled query parameters', async () => {
+    const mock = withFetch(() => envelope({ result: { ok: true, value: { root: '/repo', enabled: false } } }))
+    try {
+      const outcome = await requestWorkspaceToggle('/repo', false)
+      expect(mock.calls[0]).toBe('/api/dsh-zvec-grep/toggle-workspace?root=%2Frepo&enabled=false')
+      expect(outcome).toEqual({ ok: true, value: { root: '/repo', enabled: false } })
+    } finally {
+      mock.restore()
+    }
+  })
+
+  it('requestScopeSave sends the scope document as an encoded query parameter', async () => {
+    const mock = withFetch(() => envelope({ result: { ok: true, value: { root: '/repo', scope: { excludePaths: ['dist'] } } } }))
+    try {
+      const outcome = await requestScopeSave('/repo', '{"excludePaths":["dist"]}')
+      expect(mock.calls[0]).toBe(`/api/dsh-zvec-grep/scope?root=%2Frepo&scope=${encodeURIComponent('{"excludePaths":["dist"]}')}`)
+      expect(outcome).toEqual({ ok: true, value: { root: '/repo', scope: { excludePaths: ['dist'] } } })
+    } finally {
+      mock.restore()
+    }
+  })
+
+  it('surfaces route errors and malformed envelopes as { ok: false, message }', async () => {
+    const mock = withFetch(input => String(input).includes('scope')
+      ? envelope({ result: { ok: false, error: { code: 'bad_request', message: 'Scope is not valid JSON', details: {} } } }, 200)
+      : new Response('nope', { status: 405 }))
+    try {
+      const scopeOutcome = await requestScopeSave('/repo', 'not json')
+      expect(scopeOutcome).toEqual({ ok: false, message: 'Scope is not valid JSON' })
+      const toggleOutcome = await requestWorkspaceToggle('/repo', true)
+      expect(toggleOutcome).toEqual({ ok: false, message: 'Toggle request failed (405)' })
+    } finally {
+      mock.restore()
+    }
   })
 })
