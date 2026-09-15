@@ -41,7 +41,7 @@ function project(outcome: WorkspaceSearchOutcome) {
 export function createSearchTool(runtime: WorkspaceSearchRuntime, config: SearchToolConfig) {
   return defineTool({
     name: 'zvec_search',
-    description: 'Search the current workspace by meaning, concepts, architecture, relationships, and data flow. Returns indexing or refreshing status immediately when the background index is not ready, and an error status carrying the install command when the optional zvec-grep engine is not available. Use exact grep for known literals or exhaustive matches.',
+    description: 'Search the current workspace by meaning, concepts, architecture, relationships, and data flow. Returns indexing or refreshing status immediately when the background index is not ready, and an error status carrying the install command when the optional zvec-grep engine is not available. A disabled status means the user turned indexing off for this workspace; do not retry, mention they can enable it from the Zvec status pill. Use exact grep for known literals or exhaustive matches.',
     parameters: {
       query: { type: 'string', required: true, description: 'Natural-language search intent.' },
       limit: { type: 'integer', description: `Maximum results, from 1 to ${config.maxLimit}. Defaults to ${config.defaultLimit}.` },

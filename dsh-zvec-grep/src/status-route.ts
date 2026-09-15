@@ -20,6 +20,7 @@ export function registerStatusRoute(
   runtime: Pick<WorkspaceSearchRuntime, 'statusFor'>,
   sessions: { list(): Array<{ id: string; header: { cwd?: string } }> },
   pollIntervalMs: number,
+  isEnabled: (root: string) => boolean,
 ): () => void {
   const route: Parameters<HostConnectionFetch['register']>[0] & { requestBody?: 'buffered' | 'streaming' } = {
     path: STATUS_PATH,
@@ -31,6 +32,9 @@ export function registerStatusRoute(
         .filter((cwd): cwd is string => typeof cwd === 'string' && cwd.length > 0))]
       if (roots.length === 0) return new Response('not found', { status: 404 })
       const workspaces = roots.map(root => {
+        if (!isEnabled(root)) {
+          return { root, status: 'disabled' as const, pendingChanges: 0, updatedAt: 0 }
+        }
         const internal = runtime.statusFor(root)
         return internal === undefined ? {
           root,
@@ -46,7 +50,7 @@ export function registerStatusRoute(
         }
       })
       return new Response(JSON.stringify({
-        version: 2,
+        version: 3,
         pollIntervalMs,
         workspaces,
       }), { status: 200, headers: {

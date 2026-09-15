@@ -40,7 +40,24 @@ When Harness creates or resumes a session, the plugin reads the workspace from t
 
 Added, changed, and deleted paths are debounced and submitted to zvec-grep's incremental index API in the background. An hourly full reconciliation repairs drift if the operating-system watcher missed an event.
 
-The Harness workspace also gets a **Zvec index** status pill. It reports `Indexing`, `Refreshing`, `Ready`, or `Error` without blocking search. Select the pill to see the active workspace and pending change count. The UI is installed with the plugin; there is no separate frontend setup.
+The Harness workspace also gets a **Zvec index** status pill. It reports `Indexing`, `Refreshing`, `Ready`, `Error`, or `Off` without blocking search. Select the pill to see the active workspace, the pending change count, and the enable/disable control. The UI is installed with the plugin; there is no separate frontend setup.
+
+## Enabling a workspace
+
+Indexing is **opt-in per workspace**. A workspace with no configuration and no previous index stays off: sessions start without an engine, a watcher, or an embedding-model download, and `zvec_search` returns a structured `disabled` status instead of building anything.
+
+To turn a workspace on, either:
+
+- select the **Zvec index** pill in that workspace and choose **Enable indexing** (the toggle writes the configuration and starts indexing immediately), or
+- create `<workspace>/.zvec-grep/config.json` containing `{"enabled": true}` and start a new search.
+
+State persists as plain files under `.zvec-grep/`, evaluated in this order:
+
+1. `config.json` with a boolean `enabled` field is authoritative - a workspace disabled here stays off across plugin and engine upgrades.
+2. Without `config.json`, a workspace that already has an engine `manifest.json` predates the toggle and stays enabled, so upgrading never silently turns off existing setups.
+3. Neither file exists: the workspace follows the `defaultEnabled` option (off by default).
+
+Deleting the whole `.zvec-grep/` directory therefore returns a workspace to the default state, and re-enabling simply rebuilds the index.
 
 The first workspace may download the default local embedding model. Indexes are stored under `<workspace>/.zvec-grep/` and are excluded from their own scans. Add `.zvec-grep/` to the repository ignore rules if the project does not already ignore local tool state.
 
@@ -79,6 +96,7 @@ The bundled defaults work without configuration:
     embedding: local/potion-code-16m-v2
     device: auto
     excludePaths: []
+    defaultEnabled: false
     defaultLimit: 10
     maxLimit: 30
     watchDebounceMs: 750
@@ -86,7 +104,7 @@ The bundled defaults work without configuration:
     statusPollIntervalMs: 2000
 ```
 
-Node.js 22 or newer is required. `engineModule` accepts a package specifier, an absolute or relative filesystem path, or a `file:` URL; it is resolved lazily, in the order explicit location, bare specifier, then the global npm root. `device` accepts `auto`, `cpu`, `metal`, `vulkan`, or `cuda`. `reconcileIntervalMs: 0` disables periodic reconciliation; the default is one hour. `statusPollIntervalMs` controls the lightweight workspace-status UI refresh interval and defaults to two seconds.
+Node.js 22 or newer is required. `engineModule` accepts a package specifier, an absolute or relative filesystem path, or a `file:` URL; it is resolved lazily, in the order explicit location, bare specifier, then the global npm root. `device` accepts `auto`, `cpu`, `metal`, `vulkan`, or `cuda`. `reconcileIntervalMs: 0` disables periodic reconciliation; the default is one hour. `statusPollIntervalMs` controls the lightweight workspace-status UI refresh interval and defaults to two seconds. `defaultEnabled` only applies to workspaces with no `config.json` and no existing index; see [Enabling a workspace](#enabling-a-workspace).
 
 ### excludePaths
 

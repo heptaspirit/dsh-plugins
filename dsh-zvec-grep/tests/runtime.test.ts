@@ -267,4 +267,42 @@ describe('WorkspaceSearchRuntime', () => {
     expect(backend.index).toHaveBeenCalledOnce()
     expect(backend.context).not.toHaveBeenCalled()
   })
+
+  it('treats a disabled workspace as a no-op activation and a disabled search', async () => {
+    const backend = engine()
+    const create = vi.fn(async () => backend)
+    const enabled = vi.fn((root: string) => root !== WORKSPACE)
+    const runtime = new WorkspaceSearchRuntime({ create, enabled, reconcileIntervalMs: 0 })
+
+    await expect(runtime.activate(WORKSPACE)).resolves.toBeUndefined()
+    await expect(runtime.search(WORKSPACE, { query: 'anything' })).resolves.toEqual(
+      expect.objectContaining({ status: 'disabled', root: WORKSPACE }),
+    )
+    expect(create).not.toHaveBeenCalled()
+    expect(backend.index).not.toHaveBeenCalled()
+    expect(runtime.status()).toEqual([])
+  })
+
+  it('deactivates a workspace, releases its watcher and engine, and re-activates on demand', async () => {
+    const fixture = harness()
+    fixture.runtime.activate(WORKSPACE)
+    await fixture.runtime.settled(WORKSPACE)
+
+    await fixture.runtime.deactivate(WORKSPACE)
+
+    expect(fixture.runtime.status()).toEqual([])
+    expect(fixture.watcher.close).toHaveBeenCalledOnce()
+    expect(fixture.backend.close).toHaveBeenCalledOnce()
+
+    const outcome = await fixture.runtime.search(WORKSPACE, { query: 'again' })
+    expect(['indexing', 'ready']).toContain(outcome.status)
+    expect(fixture.watch).toHaveBeenCalledTimes(2)
+    await fixture.runtime.settled(WORKSPACE)
+    await fixture.runtime.close()
+  })
+
+  it('ignores deactivation of a workspace that was never activated', async () => {
+    const fixture = harness()
+    await expect(fixture.runtime.deactivate(WORKSPACE)).resolves.toBeUndefined()
+  })
 })

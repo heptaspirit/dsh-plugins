@@ -4,7 +4,7 @@ import { IndexStatusSource } from '../src/client/status-source.ts'
 afterEach(() => vi.useRealTimers())
 
 function payload(workspaces: unknown[], pollIntervalMs = 750): Response {
-  return new Response(JSON.stringify({ version: 2, pollIntervalMs, workspaces }), {
+  return new Response(JSON.stringify({ version: 3, pollIntervalMs, workspaces }), {
     status: 200,
     headers: { 'content-type': 'application/json' },
   })
@@ -152,5 +152,57 @@ describe('IndexStatusSource', () => {
     } finally {
       globalThis.fetch = originalFetch
     }
+  })
+
+  it('accepts a disabled workspace phase from the version 3 payload', async () => {
+    vi.useFakeTimers()
+    const source = new IndexStatusSource(vi.fn(async () => payload([
+      { root: '/repo', status: 'disabled', pendingChanges: 0, updatedAt: 0 },
+    ])))
+    source.selectWorkspace('/repo')
+    source.start()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(source.getSnapshot()).toEqual(expect.objectContaining({
+      connection: 'ready',
+      status: expect.objectContaining({ root: '/repo', status: 'disabled' }),
+    }))
+    source.stop()
+  })
+
+  it('rejects an older payload version instead of misparsing it', async () => {
+    vi.useFakeTimers()
+    const stale = new Response(JSON.stringify({ version: 2, pollIntervalMs: 750, workspaces: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+    const source = new IndexStatusSource(vi.fn(async () => stale))
+    source.selectWorkspace('/repo')
+    source.start()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(source.getSnapshot()).toEqual(expect.objectContaining({ connection: 'error' }))
+    source.stop()
+  })
+
+  it('refresh forces an immediate poll instead of waiting out the interval', async () => {
+    vi.useFakeTimers()
+    const fetchStatus = vi.fn(async () => payload([
+      { root: '/repo', status: 'disabled', pendingChanges: 0, updatedAt: 0 },
+    ]))
+    const source = new IndexStatusSource(fetchStatus)
+    source.selectWorkspace('/repo')
+    source.start()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetchStatus).toHaveBeenCalledOnce()
+
+    source.refresh()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetchStatus).toHaveBeenCalledTimes(2)
+    expect(source.getSnapshot()).toEqual(expect.objectContaining({
+      connection: 'ready',
+      status: expect.objectContaining({ status: 'disabled' }),
+    }))
+    source.stop()
   })
 })

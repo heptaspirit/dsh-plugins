@@ -20,5 +20,5 @@ export declare function registerStatusRoute(connection: HostConnectionFetch, run
             cwd?: string;
         };
     }>;
-}, pollIntervalMs: number): () => void;
+}, pollIntervalMs: number, isEnabled: (root: string) => boolean): () => void;
 //# sourceMappingURL=status-route.d.ts.map

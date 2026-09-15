@@ -1,6 +1,6 @@
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 
-export type IndexPhase = 'indexing' | 'refreshing' | 'ready' | 'error'
+export type IndexPhase = 'indexing' | 'refreshing' | 'ready' | 'error' | 'disabled'
 
 export interface WorkspaceIndexStatus {
   status: IndexPhase
@@ -22,6 +22,7 @@ export interface IndexStatusSnapshot {
 type FetchStatus = () => Promise<Response>
 
 const STATUS_PATH = '/api/dsh-zvec-grep/status'
+const TOGGLE_PATH = '/api/dsh-zvec-grep/toggle-workspace'
 const ERROR_RETRY_MS = 5000
 const MISSING_WORKSPACE_RETRY_MS = 250
 
@@ -32,7 +33,7 @@ function parseWorkspace(value: unknown): WorkspaceStatus | undefined {
   const item = value as Record<string, unknown>
   if (
     typeof item.root !== 'string' || item.root.length === 0
-    || !['indexing', 'refreshing', 'ready', 'error'].includes(String(item.status))
+    || !['indexing', 'refreshing', 'ready', 'error', 'disabled'].includes(String(item.status))
     || typeof item.pendingChanges !== 'number'
     || typeof item.updatedAt !== 'number'
   ) return undefined
@@ -48,7 +49,7 @@ function parseWorkspace(value: unknown): WorkspaceStatus | undefined {
 function parsePayload(value: unknown): { pollIntervalMs: number; workspaces: WorkspaceStatus[] } {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('Invalid zvec status response')
   const payload = value as Record<string, unknown>
-  if (payload.version !== 2 || typeof payload.pollIntervalMs !== 'number' || !Array.isArray(payload.workspaces)) {
+  if (payload.version !== 3 || typeof payload.pollIntervalMs !== 'number' || !Array.isArray(payload.workspaces)) {
     throw new Error('Invalid zvec status response')
   }
   const workspaces = payload.workspaces.map(parseWorkspace)
@@ -97,6 +98,16 @@ export class IndexStatusSource implements HostObservable<IndexStatusSnapshot> {
     this.timer = undefined
   }
 
+  /** Forces an immediate poll, e.g. after a toggle so the pill reflects the new state at once. */
+  refresh(): void {
+    if (!this.running) return
+    if (this.timer) {
+      clearTimeout(this.timer)
+      this.timer = undefined
+    }
+    void this.poll()
+  }
+
   private async poll(): Promise<void> {
     const root = this.root
     if (root === undefined) return
@@ -137,4 +148,36 @@ export class IndexStatusSource implements HostObservable<IndexStatusSnapshot> {
       try { listener() } catch { /* One UI listener must not stop polling. */ }
     }
   }
+}
+
+export type ToggleOutcome = { ok: true } | { ok: false; message: string }
+
+/**
+ * Toggles one workspace through the plugin's exact Fetch route on the shared /api channel.
+ * Exact routes only accept GET/HEAD, so the toggle is a GET with query parameters; browser
+ * authentication and the origin fence apply like on every /api request.
+ */
+export async function requestWorkspaceToggle(root: string, enabled: boolean): Promise<ToggleOutcome> {
+  let response: Response
+  try {
+    const url = `${TOGGLE_PATH}?root=${encodeURIComponent(root)}&enabled=${enabled}`
+    response = await fetch(url)
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) }
+  }
+  if (!response.ok) return { ok: false, message: `Toggle request failed (${response.status})` }
+  let envelope: unknown
+  try {
+    envelope = await response.json()
+  } catch {
+    return { ok: false, message: 'Toggle response was not JSON' }
+  }
+  const result = (typeof envelope === 'object' && envelope !== null && !Array.isArray(envelope)
+    ? (envelope as Record<string, unknown>)['result']
+    : undefined) as { ok?: boolean; error?: { message?: string } } | undefined
+  if (typeof result !== 'object' || result === null || typeof result.ok !== 'boolean') {
+    return { ok: false, message: 'Malformed toggle response' }
+  }
+  if (result.ok) return { ok: true }
+  return { ok: false, message: result.error?.message ?? 'Toggle failed' }
 }

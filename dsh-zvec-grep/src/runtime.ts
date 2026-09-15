@@ -1,5 +1,4 @@
-import { realpathSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { canonicalizeRoot } from './config-file.ts'
 import type { SearchEngine, ZvecContextOptions, ZvecContextResult, ZvecIndexOptions } from './engine.ts'
 
 export type { SearchEngine } from './engine.ts'
@@ -18,6 +17,7 @@ export type WorkspaceSearchOutcome =
   | { status: 'indexing'; root: string; message: string }
   | { status: 'refreshing'; root: string; message: string }
   | { status: 'error'; root: string; message: string }
+  | { status: 'disabled'; root: string; message: string }
   | { status: 'ready'; result: ZvecContextResult }
 
 export interface WorkspaceIndexStatus {
@@ -35,6 +35,11 @@ export interface WorkspaceSearchRuntimeOptions {
   reconcileIntervalMs?: number
   /** Paths excluded from every index and search call; empty or undefined means no filter. */
   excludePaths?: readonly string[]
+  /**
+   * Per-workspace enablement gate. When provided and it returns false, activation is a no-op
+   * and search reports `disabled` instead of lazily starting the engine.
+   */
+  enabled?: (root: string) => boolean
 }
 
 type Phase = 'indexing' | 'refreshing' | 'ready' | 'error'
@@ -59,19 +64,11 @@ interface WorkspaceState {
 const statusMessages = {
   indexing: 'The workspace index is still being built.',
   refreshing: 'The workspace index is being refreshed in the background.',
+  disabled: 'Zvec indexing is disabled for this workspace. Enable it from the Zvec status pill, or by setting "enabled": true in the workspace .zvec-grep/config.json.',
 } as const
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
-}
-
-function canonicalizeRoot(root: string): string {
-  const absolute = resolve(root)
-  try {
-    return realpathSync.native(absolute)
-  } catch {
-    return absolute
-  }
 }
 
 export class WorkspaceSearchRuntime {
@@ -83,6 +80,7 @@ export class WorkspaceSearchRuntime {
     root = canonicalizeRoot(root)
     const existing = this.workspaces.get(root)
     if (existing) return existing.initialIndex
+    if (this.options.enabled !== undefined && !this.options.enabled(root)) return Promise.resolve()
 
     const state: WorkspaceState = {
       root,
@@ -127,6 +125,9 @@ export class WorkspaceSearchRuntime {
     root = canonicalizeRoot(root)
     let state = this.workspaces.get(root)
     if (!state) {
+      if (this.options.enabled !== undefined && !this.options.enabled(root)) {
+        return { status: 'disabled', root, message: statusMessages.disabled }
+      }
       void this.activate(root).catch(() => undefined)
       state = this.workspaces.get(root)!
     }
@@ -160,17 +161,35 @@ export class WorkspaceSearchRuntime {
     void state.initialIndex.catch(() => undefined)
   }
 
+  /**
+   * Tears one workspace down: aborts in-flight work, closes its watcher and engine, and removes
+   * it from the runtime so a later search lazily re-activates it from scratch.
+   */
+  async deactivate(root: string): Promise<void> {
+    root = canonicalizeRoot(root)
+    const state = this.workspaces.get(root)
+    if (!state) return
+    this.workspaces.delete(root)
+    await this.disposeState(state, 'dsh-zvec-grep workspace disabled')
+  }
+
   async close(): Promise<void> {
     const states = [...this.workspaces.values()]
     this.workspaces.clear()
-    for (const state of states) {
-      state.controller.abort(new Error('dsh-zvec-grep disposed'))
-      if (state.debounceTimer) clearTimeout(state.debounceTimer)
-      if (state.reconcileTimer) clearInterval(state.reconcileTimer)
+    await Promise.allSettled(states.map(state => this.disposeState(state, 'dsh-zvec-grep disposed')))
+  }
+
+  private async disposeState(state: WorkspaceState, reason: string): Promise<void> {
+    state.controller.abort(new Error(reason))
+    if (state.debounceTimer) clearTimeout(state.debounceTimer)
+    if (state.reconcileTimer) clearInterval(state.reconcileTimer)
+    await Promise.resolve(state.watcher?.close()).catch(() => undefined)
+    await Promise.allSettled([state.initialIndex, state.refresh].filter((task): task is Promise<void> => Boolean(task)))
+    try {
+      await (await state.engine).close()
+    } catch {
+      // A failed engine promise can never be closed; nothing to release.
     }
-    await Promise.allSettled(states.map(state => Promise.resolve(state.watcher?.close())))
-    await Promise.allSettled(states.flatMap(state => [state.initialIndex, state.refresh].filter((task): task is Promise<void> => Boolean(task))))
-    await Promise.allSettled(states.map(async state => (await state.engine).close()))
   }
 
   private startWatcher(state: WorkspaceState): void {

@@ -10,6 +10,8 @@ export interface Config {
     device?: 'auto' | 'cpu' | 'metal' | 'vulkan' | 'cuda';
     /** Workspace-relative paths or globs the engine must never index or search. */
     excludePaths?: string[];
+    /** Fallback for workspaces with no `.zvec-grep/config.json` and no existing index. */
+    defaultEnabled?: boolean;
     defaultLimit?: number;
     maxLimit?: number;
     watchDebounceMs?: number;

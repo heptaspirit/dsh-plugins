@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { realpathSync, watch } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, watch, writeFileSync } from "node:fs";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 
 //#region src/engine.ts
@@ -242,13 +242,17 @@ var EngineLoader = class {
 };
 
 //#endregion
-//#region src/runtime.ts
-const statusMessages = {
-	indexing: "The workspace index is still being built.",
-	refreshing: "The workspace index is being refreshed in the background."
-};
-function errorMessage(error) {
-	return error instanceof Error ? error.message : String(error);
+//#region src/config-file.ts
+/** Directory under each workspace root that stores this plugin's persistent state. */
+const INDEX_DIR_NAME = ".zvec-grep";
+function indexDir(root) {
+	return join(root, INDEX_DIR_NAME);
+}
+function workspaceConfigPath(root) {
+	return join(indexDir(root), "config.json");
+}
+function workspaceManifestPath(root) {
+	return join(indexDir(root), "manifest.json");
 }
 function canonicalizeRoot(root) {
 	const absolute = resolve(root);
@@ -257,6 +261,52 @@ function canonicalizeRoot(root) {
 	} catch {
 		return absolute;
 	}
+}
+/**
+* Reads `.zvec-grep/config.json`. Returns `undefined` when the file is missing or unreadable;
+* a malformed file is treated the same way so a broken config never strands a working
+* workspace on the wrong side of the toggle.
+*/
+function readWorkspaceConfig(root) {
+	try {
+		const parsed = JSON.parse(readFileSync(workspaceConfigPath(root), "utf8"));
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return void 0;
+		const enabled = parsed["enabled"];
+		return typeof enabled === "boolean" ? { enabled } : {};
+	} catch {
+		return;
+	}
+}
+function writeWorkspaceConfig(root, enabled) {
+	mkdirSync(indexDir(root), { recursive: true });
+	writeFileSync(workspaceConfigPath(root), `${JSON.stringify({ enabled }, null, 2)}\n`, "utf8");
+}
+/**
+* Enablement rules, oldest behavior first:
+*
+* 1. `config.json` carrying a boolean `enabled` field is authoritative forever, so a workspace
+*    explicitly disabled through the pill stays off across plugin and engine upgrades.
+* 2. Without `config.json`, a workspace that already has an engine `manifest.json` predates the
+*    toggle and stays enabled - every workspace the previous version ever indexed has one, so
+*    existing setups keep working without manual migration.
+* 3. Neither file exists: a brand-new workspace follows `defaultEnabled` (off unless opted in).
+*/
+function resolveEnabled(root, defaultEnabled) {
+	const config = readWorkspaceConfig(root);
+	if (config?.enabled !== void 0) return config.enabled;
+	if (existsSync(workspaceManifestPath(root))) return true;
+	return defaultEnabled;
+}
+
+//#endregion
+//#region src/runtime.ts
+const statusMessages = {
+	indexing: "The workspace index is still being built.",
+	refreshing: "The workspace index is being refreshed in the background.",
+	disabled: "Zvec indexing is disabled for this workspace. Enable it from the Zvec status pill, or by setting \"enabled\": true in the workspace .zvec-grep/config.json."
+};
+function errorMessage(error) {
+	return error instanceof Error ? error.message : String(error);
 }
 var WorkspaceSearchRuntime = class {
 	workspaces = /* @__PURE__ */ new Map();
@@ -267,6 +317,7 @@ var WorkspaceSearchRuntime = class {
 		root = canonicalizeRoot(root);
 		const existing = this.workspaces.get(root);
 		if (existing) return existing.initialIndex;
+		if (this.options.enabled !== void 0 && !this.options.enabled(root)) return Promise.resolve();
 		const state = {
 			root,
 			engine: this.options.create(root),
@@ -306,6 +357,11 @@ var WorkspaceSearchRuntime = class {
 		root = canonicalizeRoot(root);
 		let state = this.workspaces.get(root);
 		if (!state) {
+			if (this.options.enabled !== void 0 && !this.options.enabled(root)) return {
+				status: "disabled",
+				root,
+				message: statusMessages.disabled
+			};
 			this.activate(root).catch(() => void 0);
 			state = this.workspaces.get(root);
 		}
@@ -354,17 +410,31 @@ var WorkspaceSearchRuntime = class {
 		state.initialIndex = this.indexInitially(state);
 		state.initialIndex.catch(() => void 0);
 	}
+	/**
+	* Tears one workspace down: aborts in-flight work, closes its watcher and engine, and removes
+	* it from the runtime so a later search lazily re-activates it from scratch.
+	*/
+	async deactivate(root) {
+		root = canonicalizeRoot(root);
+		const state = this.workspaces.get(root);
+		if (!state) return;
+		this.workspaces.delete(root);
+		await this.disposeState(state, "dsh-zvec-grep workspace disabled");
+	}
 	async close() {
 		const states = [...this.workspaces.values()];
 		this.workspaces.clear();
-		for (const state of states) {
-			state.controller.abort(/* @__PURE__ */ new Error("dsh-zvec-grep disposed"));
-			if (state.debounceTimer) clearTimeout(state.debounceTimer);
-			if (state.reconcileTimer) clearInterval(state.reconcileTimer);
-		}
-		await Promise.allSettled(states.map((state) => Promise.resolve(state.watcher?.close())));
-		await Promise.allSettled(states.flatMap((state) => [state.initialIndex, state.refresh].filter((task) => Boolean(task))));
-		await Promise.allSettled(states.map(async (state) => (await state.engine).close()));
+		await Promise.allSettled(states.map((state) => this.disposeState(state, "dsh-zvec-grep disposed")));
+	}
+	async disposeState(state, reason) {
+		state.controller.abort(new Error(reason));
+		if (state.debounceTimer) clearTimeout(state.debounceTimer);
+		if (state.reconcileTimer) clearInterval(state.reconcileTimer);
+		await Promise.resolve(state.watcher?.close()).catch(() => void 0);
+		await Promise.allSettled([state.initialIndex, state.refresh].filter((task) => Boolean(task)));
+		try {
+			await (await state.engine).close();
+		} catch {}
 	}
 	startWatcher(state) {
 		if (this.options.watch) state.watcher = this.options.watch(state.root, {
@@ -491,7 +561,7 @@ function project(outcome) {
 function createSearchTool(runtime, config) {
 	return defineTool({
 		name: "zvec_search",
-		description: "Search the current workspace by meaning, concepts, architecture, relationships, and data flow. Returns indexing or refreshing status immediately when the background index is not ready, and an error status carrying the install command when the optional zvec-grep engine is not available. Use exact grep for known literals or exhaustive matches.",
+		description: "Search the current workspace by meaning, concepts, architecture, relationships, and data flow. Returns indexing or refreshing status immediately when the background index is not ready, and an error status carrying the install command when the optional zvec-grep engine is not available. A disabled status means the user turned indexing off for this workspace; do not retry, mention they can enable it from the Zvec status pill. Use exact grep for known literals or exhaustive matches.",
 		parameters: {
 			query: {
 				type: "string",
@@ -610,7 +680,7 @@ const STATUS_PATH = "/api/dsh-zvec-grep/status";
 * `Request with GET/HEAD method cannot have body`, surfaced to the client as a bare 400 on every
 * poll. The host's own GET routes set the same mode for the same reason.
 */
-function registerStatusRoute(connection, runtime, sessions, pollIntervalMs) {
+function registerStatusRoute(connection, runtime, sessions, pollIntervalMs, isEnabled) {
 	const route = {
 		path: STATUS_PATH,
 		methods: ["GET"],
@@ -619,6 +689,12 @@ function registerStatusRoute(connection, runtime, sessions, pollIntervalMs) {
 			const roots = [...new Set(sessions.list().map((item) => item.header.cwd).filter((cwd) => typeof cwd === "string" && cwd.length > 0))];
 			if (roots.length === 0) return new Response("not found", { status: 404 });
 			const workspaces = roots.map((root) => {
+				if (!isEnabled(root)) return {
+					root,
+					status: "disabled",
+					pendingChanges: 0,
+					updatedAt: 0
+				};
 				const internal = runtime.statusFor(root);
 				return internal === void 0 ? {
 					root,
@@ -634,7 +710,7 @@ function registerStatusRoute(connection, runtime, sessions, pollIntervalMs) {
 				};
 			});
 			return new Response(JSON.stringify({
-				version: 2,
+				version: 3,
 				pollIntervalMs,
 				workspaces
 			}), {
@@ -647,6 +723,88 @@ function registerStatusRoute(connection, runtime, sessions, pollIntervalMs) {
 		}
 	};
 	return connection.register(route);
+}
+
+//#endregion
+//#region src/toggle-route.ts
+/** Exact Fetch route the status pill uses to toggle a workspace on or off. */
+const TOGGLE_PATH = "/api/dsh-zvec-grep/toggle-workspace";
+function validatePayload(payload) {
+	const { root, enabled } = payload;
+	if (typeof root !== "string" || root.length === 0) return {
+		ok: false,
+		message: "Toggle requires a non-empty root parameter"
+	};
+	if (typeof enabled !== "boolean") return {
+		ok: false,
+		message: "Toggle requires an enabled parameter of true or false"
+	};
+	return {
+		ok: true,
+		root,
+		enabled
+	};
+}
+async function applyToggle(deps, payload) {
+	const parsed = validatePayload(payload);
+	if (!parsed.ok) return {
+		ok: false,
+		error: {
+			code: "bad_request",
+			message: parsed.message,
+			details: {}
+		}
+	};
+	const root = canonicalizeRoot(parsed.root);
+	if (!new Set(deps.sessions.list().map((item) => item.header.cwd).filter((cwd) => typeof cwd === "string" && cwd.length > 0).map(canonicalizeRoot)).has(root)) return {
+		ok: false,
+		error: {
+			code: "not_found",
+			message: `Workspace is not known to this Harness process: ${root}`,
+			details: {}
+		}
+	};
+	writeWorkspaceConfig(root, parsed.enabled);
+	if (parsed.enabled) deps.runtime.activate(root).catch(() => void 0);
+	else await deps.runtime.deactivate(root);
+	return {
+		ok: true,
+		value: {
+			root,
+			enabled: parsed.enabled
+		}
+	};
+}
+/**
+* Registers the workspace toggle as an exact Fetch route, the same registry the status
+* route lives in. Only GET/HEAD exact routes exist on the shared /api channel, so the
+* toggle is a GET with query parameters; the connection plugin's /api handler applies its
+* trust and browser-authentication fence before dispatch, exactly as for the status read.
+* (The alternatives are dead ends: `rpc.handle()` mounts a physical route through
+* `owner.webServer.register()` from the caller's fiber and fails under cordis inject
+* isolation, and `rpc.intercept('/api')` occupies the single interceptor slot that
+* dsh-api-gateway owns - registering it replaces the gateway's dispatcher and 404s the
+* entire client API.)
+*
+* SECURITY: the request carries a filesystem path, and the handler writes
+* `<root>/.zvec-grep/config.json`. The root is therefore validated against the canonicalized
+* cwd list of the sessions this Harness process knows before anything touches the disk -
+* the browser must never be able to write a config file to an arbitrary path.
+*/
+function registerToggleRoute(fetchRegistry, deps) {
+	return fetchRegistry.register({
+		path: TOGGLE_PATH,
+		methods: ["GET"],
+		fetch: async (request) => {
+			const url = new URL(request.url);
+			const enabledRaw = url.searchParams.get("enabled");
+			const result = await applyToggle(deps, {
+				root: url.searchParams.get("root") ?? void 0,
+				enabled: enabledRaw === "true" || enabledRaw === "false" ? enabledRaw === "true" : void 0
+			});
+			return Response.json({ result });
+		}
+	});
 }
 
 //#endregion
@@ -668,6 +826,7 @@ const Config = z.object({
 		"cuda"
 	]).default("auto"),
 	excludePaths: z.array(z.string()).default([]),
+	defaultEnabled: z.boolean().default(false),
 	defaultLimit: z.number().step(1).min(1).max(30).default(10),
 	maxLimit: z.number().step(1).min(1).max(100).default(30),
 	watchDebounceMs: z.number().step(1).min(50).max(3e4).default(750),
@@ -701,6 +860,7 @@ function apply(ctx, config) {
 		specifier: config.engineModule ?? DEFAULT_ENGINE_MODULE,
 		onWarning: (message) => ctx.logger.warn(message)
 	});
+	const isEnabled = (root) => resolveEnabled(root, config.defaultEnabled ?? false);
 	const runtime = new WorkspaceSearchRuntime({
 		create: async (root) => (await engines.load()).createZvecGrep({
 			root,
@@ -710,16 +870,33 @@ function apply(ctx, config) {
 		watch: createWorkspaceWatcher,
 		debounceMs: config.watchDebounceMs ?? 750,
 		reconcileIntervalMs: config.reconcileIntervalMs ?? 36e5,
-		excludePaths: config.excludePaths ?? []
+		excludePaths: config.excludePaths ?? [],
+		enabled: isEnabled
 	});
 	mountPlugin(ctx, runtime, {
 		defaultLimit: config.defaultLimit ?? 10,
 		maxLimit: config.maxLimit ?? 30
 	});
 	const statusFiber = ctx.inject(["connection"], (childCtx) => {
-		childCtx.effect(() => registerStatusRoute(childCtx.connection.fetch, runtime, childCtx.sessions, config.statusPollIntervalMs ?? 2e3), "dsh-zvec-grep: status route");
+		childCtx.effect(() => registerStatusRoute(childCtx.connection.fetch, runtime, childCtx.sessions, config.statusPollIntervalMs ?? 2e3, isEnabled), "dsh-zvec-grep: status route");
 	});
-	ctx.effect(() => () => statusFiber.dispose(), "dsh-zvec-grep: optional web status");
+	const toggleFiber = ctx.inject(["connection"], (childCtx) => {
+		childCtx.effect(() => {
+			try {
+				return registerToggleRoute(childCtx.connection.fetch, {
+					runtime,
+					sessions: childCtx.sessions
+				});
+			} catch (error) {
+				console.warn("[dsh-zvec-grep] workspace toggle route unavailable, enable/disable falls back to editing .zvec-grep/config.json:", error);
+				return () => {};
+			}
+		}, "dsh-zvec-grep: workspace toggle route");
+	});
+	ctx.effect(() => () => {
+		statusFiber.dispose();
+		toggleFiber.dispose();
+	}, "dsh-zvec-grep: optional web status");
 }
 
 //#endregion

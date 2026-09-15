@@ -21,6 +21,10 @@ export type WorkspaceSearchOutcome = {
     root: string;
     message: string;
 } | {
+    status: 'disabled';
+    root: string;
+    message: string;
+} | {
     status: 'ready';
     result: ZvecContextResult;
 };
@@ -38,6 +42,11 @@ export interface WorkspaceSearchRuntimeOptions {
     reconcileIntervalMs?: number;
     /** Paths excluded from every index and search call; empty or undefined means no filter. */
     excludePaths?: readonly string[];
+    /**
+     * Per-workspace enablement gate. When provided and it returns false, activation is a no-op
+     * and search reports `disabled` instead of lazily starting the engine.
+     */
+    enabled?: (root: string) => boolean;
 }
 type Phase = 'indexing' | 'refreshing' | 'ready' | 'error';
 export declare class WorkspaceSearchRuntime {
@@ -55,7 +64,13 @@ export declare class WorkspaceSearchRuntime {
      * restarted in the background; the caller still returns immediately.
      */
     private reactivate;
+    /**
+     * Tears one workspace down: aborts in-flight work, closes its watcher and engine, and removes
+     * it from the runtime so a later search lazily re-activates it from scratch.
+     */
+    deactivate(root: string): Promise<void>;
     close(): Promise<void>;
+    private disposeState;
     private startWatcher;
     private indexInitially;
     private failWorkspace;

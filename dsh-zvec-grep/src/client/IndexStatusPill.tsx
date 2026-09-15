@@ -2,11 +2,12 @@ import { useEffect, useState } from 'react'
 import type { PropsRuntime, SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
+import { requestWorkspaceToggle } from './status-source.ts'
 import type { IndexStatusSnapshot, IndexStatusSource, WorkspaceIndexStatus } from './status-source.ts'
 
 export type IndexStatusPillProps = PropsRuntime<'shell.overlay'> & {
   useIndexStatus: SnapshotSelectorHook<IndexStatusSnapshot>
-  statusSource: Pick<IndexStatusSource, 'selectWorkspace'>
+  statusSource: Pick<IndexStatusSource, 'selectWorkspace' | 'refresh'>
 }
 
 const labels = {
@@ -14,6 +15,7 @@ const labels = {
   refreshing: 'Refreshing',
   ready: 'Ready',
   error: 'Error',
+  disabled: 'Off',
 } as const
 
 const colors = {
@@ -21,6 +23,7 @@ const colors = {
   refreshing: 'var(--dsw-alias-brand-primary)',
   ready: 'var(--dsw-alias-state-success-primary)',
   error: 'var(--dsw-alias-state-error-primary)',
+  disabled: 'var(--dsw-alias-label-secondary)',
 } as const
 
 function currentRoot(props: IndexStatusPillProps): string | undefined {
@@ -39,6 +42,8 @@ function displayStatus(feed: IndexStatusSnapshot): WorkspaceIndexStatus | { stat
 
 export function IndexStatusPill(props: IndexStatusPillProps) {
   const [expanded, setExpanded] = useState(false)
+  const [toggling, setToggling] = useState(false)
+  const [toggleError, setToggleError] = useState<string>()
   const root = currentRoot(props)
   const feed = props.useIndexStatus((value: IndexStatusSnapshot) => value)
   useEffect(() => {
@@ -52,6 +57,22 @@ export function IndexStatusPill(props: IndexStatusPillProps) {
   // The host deliberately never sends its own index-error text, so a failing poll is the only
   // case that can name a reason: that message is the client's own transport failure.
   const reason = feed.connection === 'error' ? feed.message : undefined
+  // A toggle writes server-side files, so it is pointless (and would fail) while the status
+  // transport itself is down; hide the control instead of promising an action that errors.
+  const canToggle = feed.connection !== 'error'
+  const nextEnabled = phase === 'disabled'
+  const toggle = async () => {
+    if (toggling) return
+    setToggling(true)
+    setToggleError(undefined)
+    const outcome = await requestWorkspaceToggle(root, nextEnabled)
+    setToggling(false)
+    if (!outcome.ok) {
+      setToggleError(outcome.message)
+      return
+    }
+    props.statusSource.refresh()
+  }
   return (
     <div style={styles.anchor} data-zvec-index-status={phase}>
       {expanded && (
@@ -62,6 +83,17 @@ export function IndexStatusPill(props: IndexStatusPillProps) {
           <span>Pending changes: {status?.pendingChanges ?? 0}</span>
           {status?.errorCode && <span style={styles.error}>{feed.connection === 'error' ? 'Status unavailable' : 'Index update failed'}</span>}
           {reason !== undefined && <span style={styles.error}>{reason}</span>}
+          {toggleError !== undefined && <span style={styles.error}>{toggleError}</span>}
+          {canToggle && (
+            <button
+              type="button"
+              disabled={toggling}
+              style={toggleError === undefined ? styles.toggle : { ...styles.toggle, ...styles.toggleBusy }}
+              onClick={() => { void toggle() }}
+            >
+              {toggling ? 'Working…' : nextEnabled ? 'Enable indexing' : 'Disable indexing'}
+            </button>
+          )}
         </div>
       )}
       <button
@@ -127,4 +159,15 @@ const styles = {
     whiteSpace: 'nowrap',
   },
   error: { color: 'var(--dsw-alias-state-error-primary)', overflowWrap: 'anywhere' },
+  toggle: {
+    marginTop: 4,
+    minHeight: 28,
+    padding: '4px 10px',
+    border: '1px solid var(--dsw-alias-border-l2)',
+    borderRadius: 8,
+    background: 'var(--dsw-alias-button-floating-fill)',
+    color: 'var(--dsw-alias-label-primary)',
+    cursor: 'pointer',
+  },
+  toggleBusy: { opacity: 0.6, cursor: 'default' },
 } as const

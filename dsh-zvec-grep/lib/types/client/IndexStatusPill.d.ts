@@ -2,7 +2,7 @@ import type { PropsRuntime, SnapshotSelectorHook } from '@deepseek-ai/dsh-client
 import type { IndexStatusSnapshot, IndexStatusSource } from './status-source.ts';
 export type IndexStatusPillProps = PropsRuntime<'shell.overlay'> & {
     useIndexStatus: SnapshotSelectorHook<IndexStatusSnapshot>;
-    statusSource: Pick<IndexStatusSource, 'selectWorkspace'>;
+    statusSource: Pick<IndexStatusSource, 'selectWorkspace' | 'refresh'>;
 };
 export declare function IndexStatusPill(props: IndexStatusPillProps): import("react").JSX.Element | null;
 //# sourceMappingURL=IndexStatusPill.d.ts.map

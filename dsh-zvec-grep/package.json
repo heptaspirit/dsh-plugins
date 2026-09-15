@@ -1,6 +1,6 @@
 {
   "name": "@sugarforever/dsh-zvec-grep",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Alibaba zvec-grep workspace search integration for DeepSeek Harness",
   "repository": {
     "type": "git",

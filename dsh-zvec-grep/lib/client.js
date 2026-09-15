@@ -28,18 +28,185 @@ react = __toESM(react);
 let react_jsx_runtime = require("react/jsx-runtime");
 react_jsx_runtime = __toESM(react_jsx_runtime);
 
+//#region src/client/status-source.ts
+const STATUS_PATH = "/api/dsh-zvec-grep/status";
+const TOGGLE_PATH = "/api/dsh-zvec-grep/toggle-workspace";
+const ERROR_RETRY_MS = 5e3;
+const MISSING_WORKSPACE_RETRY_MS = 250;
+const INITIAL_SNAPSHOT = Object.freeze({ connection: "loading" });
+function parseWorkspace(value) {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return void 0;
+	const item = value;
+	if (typeof item.root !== "string" || item.root.length === 0 || ![
+		"indexing",
+		"refreshing",
+		"ready",
+		"error",
+		"disabled"
+	].includes(String(item.status)) || typeof item.pendingChanges !== "number" || typeof item.updatedAt !== "number") return void 0;
+	return Object.freeze({
+		root: item.root,
+		status: item.status,
+		pendingChanges: item.pendingChanges,
+		updatedAt: item.updatedAt,
+		...item.errorCode === "index_failed" ? { errorCode: "index_failed" } : {}
+	});
+}
+function parsePayload(value) {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Invalid zvec status response");
+	const payload = value;
+	if (payload.version !== 3 || typeof payload.pollIntervalMs !== "number" || !Array.isArray(payload.workspaces)) throw new Error("Invalid zvec status response");
+	const workspaces = payload.workspaces.map(parseWorkspace);
+	if (workspaces.some((item) => item === void 0)) throw new Error("Invalid zvec workspace status");
+	return {
+		pollIntervalMs: payload.pollIntervalMs,
+		workspaces
+	};
+}
+var IndexStatusSource = class {
+	snapshot = INITIAL_SNAPSHOT;
+	listeners = /* @__PURE__ */ new Set();
+	timer;
+	running = false;
+	root;
+	generation = 0;
+	constructor(fetchStatus = () => fetch(STATUS_PATH, { cache: "no-store" })) {
+		this.fetchStatus = fetchStatus;
+	}
+	getSnapshot = () => this.snapshot;
+	subscribe = (listener) => {
+		this.listeners.add(listener);
+		return () => {
+			this.listeners.delete(listener);
+		};
+	};
+	selectWorkspace(root) {
+		if (this.root === root) return;
+		const hadRoot = this.root !== void 0;
+		this.root = root;
+		this.generation += 1;
+		if (this.timer) clearTimeout(this.timer);
+		this.timer = void 0;
+		if (hadRoot || this.snapshot !== INITIAL_SNAPSHOT) this.publish(INITIAL_SNAPSHOT);
+		if (this.running && root !== void 0) this.poll();
+	}
+	start() {
+		if (this.running) return;
+		this.running = true;
+		this.poll();
+	}
+	stop() {
+		this.running = false;
+		this.generation += 1;
+		if (this.timer) clearTimeout(this.timer);
+		this.timer = void 0;
+	}
+	/** Forces an immediate poll, e.g. after a toggle so the pill reflects the new state at once. */
+	refresh() {
+		if (!this.running) return;
+		if (this.timer) {
+			clearTimeout(this.timer);
+			this.timer = void 0;
+		}
+		this.poll();
+	}
+	async poll() {
+		const root = this.root;
+		if (root === void 0) return;
+		const generation = this.generation;
+		let nextDelay = ERROR_RETRY_MS;
+		try {
+			const response = await this.fetchStatus();
+			if (response.status === 404) {
+				nextDelay = MISSING_WORKSPACE_RETRY_MS;
+				if (this.running && this.generation === generation) this.publish(INITIAL_SNAPSHOT);
+			} else {
+				if (!response.ok) throw new Error(`Zvec status request failed (${response.status}) for GET ${STATUS_PATH}`);
+				const payload = parsePayload(await response.json());
+				const status = payload.workspaces.find((item) => item.root === root);
+				nextDelay = status === void 0 ? MISSING_WORKSPACE_RETRY_MS : Math.max(250, payload.pollIntervalMs);
+				if (this.running && this.generation === generation) this.publish(status === void 0 ? INITIAL_SNAPSHOT : Object.freeze({
+					connection: "ready",
+					status
+				}));
+			}
+		} catch (error) {
+			if (this.running && this.generation === generation) this.publish(Object.freeze({
+				connection: "error",
+				...this.snapshot.status === void 0 ? {} : { status: this.snapshot.status },
+				message: error instanceof Error ? error.message : String(error)
+			}));
+		}
+		if (this.running && this.generation === generation) {
+			this.timer = setTimeout(() => {
+				this.poll();
+			}, nextDelay);
+			this.timer.unref?.();
+		}
+	}
+	publish(snapshot) {
+		this.snapshot = snapshot;
+		for (const listener of this.listeners) try {
+			listener();
+		} catch {}
+	}
+};
+/**
+* Toggles one workspace through the plugin's exact Fetch route on the shared /api channel.
+* Exact routes only accept GET/HEAD, so the toggle is a GET with query parameters; browser
+* authentication and the origin fence apply like on every /api request.
+*/
+async function requestWorkspaceToggle(root, enabled) {
+	let response;
+	try {
+		const url = `${TOGGLE_PATH}?root=${encodeURIComponent(root)}&enabled=${enabled}`;
+		response = await fetch(url);
+	} catch (error) {
+		return {
+			ok: false,
+			message: error instanceof Error ? error.message : String(error)
+		};
+	}
+	if (!response.ok) return {
+		ok: false,
+		message: `Toggle request failed (${response.status})`
+	};
+	let envelope;
+	try {
+		envelope = await response.json();
+	} catch {
+		return {
+			ok: false,
+			message: "Toggle response was not JSON"
+		};
+	}
+	const result = typeof envelope === "object" && envelope !== null && !Array.isArray(envelope) ? envelope["result"] : void 0;
+	if (typeof result !== "object" || result === null || typeof result.ok !== "boolean") return {
+		ok: false,
+		message: "Malformed toggle response"
+	};
+	if (result.ok) return { ok: true };
+	return {
+		ok: false,
+		message: result.error?.message ?? "Toggle failed"
+	};
+}
+
+//#endregion
 //#region src/client/IndexStatusPill.tsx
 const labels = {
 	indexing: "Indexing",
 	refreshing: "Refreshing",
 	ready: "Ready",
-	error: "Error"
+	error: "Error",
+	disabled: "Off"
 };
 const colors = {
 	indexing: "var(--dsw-alias-state-warn-primary)",
 	refreshing: "var(--dsw-alias-brand-primary)",
 	ready: "var(--dsw-alias-state-success-primary)",
-	error: "var(--dsw-alias-state-error-primary)"
+	error: "var(--dsw-alias-state-error-primary)",
+	disabled: "var(--dsw-alias-label-secondary)"
 };
 function currentRoot(props) {
 	return props.useSessions((state) => {
@@ -58,6 +225,8 @@ function displayStatus(feed) {
 }
 function IndexStatusPill(props) {
 	const [expanded, setExpanded] = (0, react.useState)(false);
+	const [toggling, setToggling] = (0, react.useState)(false);
+	const [toggleError, setToggleError] = (0, react.useState)();
 	const root = currentRoot(props);
 	const feed = props.useIndexStatus((value) => value);
 	(0, react.useEffect)(() => {
@@ -68,6 +237,20 @@ function IndexStatusPill(props) {
 	const phase = status?.status ?? "indexing";
 	const label = status === void 0 && feed.connection === "loading" ? "Loading" : labels[phase];
 	const reason = feed.connection === "error" ? feed.message : void 0;
+	const canToggle = feed.connection !== "error";
+	const nextEnabled = phase === "disabled";
+	const toggle = async () => {
+		if (toggling) return;
+		setToggling(true);
+		setToggleError(void 0);
+		const outcome = await requestWorkspaceToggle(root, nextEnabled);
+		setToggling(false);
+		if (!outcome.ok) {
+			setToggleError(outcome.message);
+			return;
+		}
+		props.statusSource.refresh();
+	};
 	return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 		style: styles.anchor,
 		"data-zvec-index-status": phase,
@@ -92,6 +275,22 @@ function IndexStatusPill(props) {
 				reason !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 					style: styles.error,
 					children: reason
+				}),
+				toggleError !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+					style: styles.error,
+					children: toggleError
+				}),
+				canToggle && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+					type: "button",
+					disabled: toggling,
+					style: toggleError === void 0 ? styles.toggle : {
+						...styles.toggle,
+						...styles.toggleBusy
+					},
+					onClick: () => {
+						toggle();
+					},
+					children: toggling ? "Working…" : nextEnabled ? "Enable indexing" : "Disable indexing"
 				})
 			]
 		}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
@@ -171,120 +370,20 @@ const styles = {
 	error: {
 		color: "var(--dsw-alias-state-error-primary)",
 		overflowWrap: "anywhere"
-	}
-};
-
-//#endregion
-//#region src/client/status-source.ts
-const STATUS_PATH = "/api/dsh-zvec-grep/status";
-const ERROR_RETRY_MS = 5e3;
-const MISSING_WORKSPACE_RETRY_MS = 250;
-const INITIAL_SNAPSHOT = Object.freeze({ connection: "loading" });
-function parseWorkspace(value) {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return void 0;
-	const item = value;
-	if (typeof item.root !== "string" || item.root.length === 0 || ![
-		"indexing",
-		"refreshing",
-		"ready",
-		"error"
-	].includes(String(item.status)) || typeof item.pendingChanges !== "number" || typeof item.updatedAt !== "number") return void 0;
-	return Object.freeze({
-		root: item.root,
-		status: item.status,
-		pendingChanges: item.pendingChanges,
-		updatedAt: item.updatedAt,
-		...item.errorCode === "index_failed" ? { errorCode: "index_failed" } : {}
-	});
-}
-function parsePayload(value) {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Invalid zvec status response");
-	const payload = value;
-	if (payload.version !== 2 || typeof payload.pollIntervalMs !== "number" || !Array.isArray(payload.workspaces)) throw new Error("Invalid zvec status response");
-	const workspaces = payload.workspaces.map(parseWorkspace);
-	if (workspaces.some((item) => item === void 0)) throw new Error("Invalid zvec workspace status");
-	return {
-		pollIntervalMs: payload.pollIntervalMs,
-		workspaces
-	};
-}
-var IndexStatusSource = class {
-	snapshot = INITIAL_SNAPSHOT;
-	listeners = /* @__PURE__ */ new Set();
-	timer;
-	running = false;
-	root;
-	generation = 0;
-	constructor(fetchStatus = () => fetch(STATUS_PATH, { cache: "no-store" })) {
-		this.fetchStatus = fetchStatus;
-	}
-	getSnapshot = () => this.snapshot;
-	subscribe = (listener) => {
-		this.listeners.add(listener);
-		return () => {
-			this.listeners.delete(listener);
-		};
-	};
-	selectWorkspace(root) {
-		if (this.root === root) return;
-		const hadRoot = this.root !== void 0;
-		this.root = root;
-		this.generation += 1;
-		if (this.timer) clearTimeout(this.timer);
-		this.timer = void 0;
-		if (hadRoot || this.snapshot !== INITIAL_SNAPSHOT) this.publish(INITIAL_SNAPSHOT);
-		if (this.running && root !== void 0) this.poll();
-	}
-	start() {
-		if (this.running) return;
-		this.running = true;
-		this.poll();
-	}
-	stop() {
-		this.running = false;
-		this.generation += 1;
-		if (this.timer) clearTimeout(this.timer);
-		this.timer = void 0;
-	}
-	async poll() {
-		const root = this.root;
-		if (root === void 0) return;
-		const generation = this.generation;
-		let nextDelay = ERROR_RETRY_MS;
-		try {
-			const response = await this.fetchStatus();
-			if (response.status === 404) {
-				nextDelay = MISSING_WORKSPACE_RETRY_MS;
-				if (this.running && this.generation === generation) this.publish(INITIAL_SNAPSHOT);
-			} else {
-				if (!response.ok) throw new Error(`Zvec status request failed (${response.status}) for GET ${STATUS_PATH}`);
-				const payload = parsePayload(await response.json());
-				const status = payload.workspaces.find((item) => item.root === root);
-				nextDelay = status === void 0 ? MISSING_WORKSPACE_RETRY_MS : Math.max(250, payload.pollIntervalMs);
-				if (this.running && this.generation === generation) this.publish(status === void 0 ? INITIAL_SNAPSHOT : Object.freeze({
-					connection: "ready",
-					status
-				}));
-			}
-		} catch (error) {
-			if (this.running && this.generation === generation) this.publish(Object.freeze({
-				connection: "error",
-				...this.snapshot.status === void 0 ? {} : { status: this.snapshot.status },
-				message: error instanceof Error ? error.message : String(error)
-			}));
-		}
-		if (this.running && this.generation === generation) {
-			this.timer = setTimeout(() => {
-				this.poll();
-			}, nextDelay);
-			this.timer.unref?.();
-		}
-	}
-	publish(snapshot) {
-		this.snapshot = snapshot;
-		for (const listener of this.listeners) try {
-			listener();
-		} catch {}
+	},
+	toggle: {
+		marginTop: 4,
+		minHeight: 28,
+		padding: "4px 10px",
+		border: "1px solid var(--dsw-alias-border-l2)",
+		borderRadius: 8,
+		background: "var(--dsw-alias-button-floating-fill)",
+		color: "var(--dsw-alias-label-primary)",
+		cursor: "pointer"
+	},
+	toggleBusy: {
+		opacity: .6,
+		cursor: "default"
 	}
 };
 

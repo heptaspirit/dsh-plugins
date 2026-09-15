@@ -3,10 +3,12 @@ import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import z from '@deepseek-ai/schemastery'
 import { DEFAULT_ENGINE_MODULE, EngineLoader } from './engine.ts'
+import { resolveEnabled } from './config-file.ts'
 import { WorkspaceSearchRuntime } from './runtime.ts'
 import { createSearchTool, type SearchToolConfig } from './tool.ts'
 import { createWorkspaceWatcher } from './watcher.ts'
 import { registerStatusRoute } from './status-route.ts'
+import { registerToggleRoute } from './toggle-route.ts'
 
 export const name = 'dsh-zvec-grep'
 export const inject = ['sessions', 'tools', 'systemPrompt']
@@ -17,6 +19,8 @@ export interface Config {
   device?: 'auto' | 'cpu' | 'metal' | 'vulkan' | 'cuda'
   /** Workspace-relative paths or globs the engine must never index or search. */
   excludePaths?: string[]
+  /** Fallback for workspaces with no `.zvec-grep/config.json` and no existing index. */
+  defaultEnabled?: boolean
   defaultLimit?: number
   maxLimit?: number
   watchDebounceMs?: number
@@ -29,6 +33,7 @@ export const Config: z<Config> = z.object({
   embedding: z.string().default('local/potion-code-16m-v2'),
   device: z.union(['auto', 'cpu', 'metal', 'vulkan', 'cuda']).default('auto'),
   excludePaths: z.array(z.string()).default([]),
+  defaultEnabled: z.boolean().default(false),
   defaultLimit: z.number().step(1).min(1).max(30).default(10),
   maxLimit: z.number().step(1).min(1).max(100).default(30),
   watchDebounceMs: z.number().step(1).min(50).max(30_000).default(750),
@@ -65,6 +70,9 @@ export function apply(ctx: Context, config: Config): void {
     specifier: config.engineModule ?? DEFAULT_ENGINE_MODULE,
     onWarning: message => ctx.logger.warn(message),
   })
+  // Enablement rules live in config-file.ts: an explicit config.json wins, an existing engine
+  // manifest grandfathers the workspace on, everything else follows defaultEnabled.
+  const isEnabled = (root: string) => resolveEnabled(root, config.defaultEnabled ?? false)
   const runtime = new WorkspaceSearchRuntime({
     // Resolved lazily so a missing engine package never blocks plugin activation.
     create: async root => (await engines.load()).createZvecGrep({ root, embedding, device }),
@@ -72,16 +80,36 @@ export function apply(ctx: Context, config: Config): void {
     debounceMs: config.watchDebounceMs ?? 750,
     reconcileIntervalMs: config.reconcileIntervalMs ?? 3_600_000,
     excludePaths: config.excludePaths ?? [],
+    enabled: isEnabled,
   })
   mountPlugin(ctx, runtime, {
     defaultLimit: config.defaultLimit ?? 10,
     maxLimit: config.maxLimit ?? 30,
   })
+  // The status route only writes into the connection service's own registry and is mounted
+  // by the connection plugin itself, so it never needs webServer access and must survive
+  // even if the experimental toggle channel fails.
   const statusFiber = ctx.inject(['connection'], childCtx => {
     childCtx.effect(
-      () => registerStatusRoute(childCtx.connection.fetch, runtime, childCtx.sessions, config.statusPollIntervalMs ?? 2_000),
+      () => registerStatusRoute(childCtx.connection.fetch, runtime, childCtx.sessions, config.statusPollIntervalMs ?? 2_000, isEnabled),
       'dsh-zvec-grep: status route',
     )
   })
-  ctx.effect(() => () => statusFiber.dispose(), 'dsh-zvec-grep: optional web status')
+  // The toggle route rides the exact Fetch-route registry (like the status route above);
+  // isolate it anyway so an unexpected registration failure can never abort the plugin and
+  // take the status route down with it (fallback: edit .zvec-grep/config.json).
+  const toggleFiber = ctx.inject(['connection'], childCtx => {
+    childCtx.effect(() => {
+      try {
+        return registerToggleRoute(childCtx.connection.fetch, { runtime, sessions: childCtx.sessions })
+      } catch (error) {
+        console.warn('[dsh-zvec-grep] workspace toggle route unavailable, enable/disable falls back to editing .zvec-grep/config.json:', error)
+        return () => {}
+      }
+    }, 'dsh-zvec-grep: workspace toggle route')
+  })
+  ctx.effect(() => () => {
+    statusFiber.dispose()
+    toggleFiber.dispose()
+  }, 'dsh-zvec-grep: optional web status')
 }
