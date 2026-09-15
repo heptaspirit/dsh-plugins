@@ -90,12 +90,13 @@ Node.js 22 or newer is required. `engineModule` accepts a package specifier, an 
 
 ### excludePaths
 
-`excludePaths` lists workspace-relative paths or glob patterns the engine must never index or search. Entries are matched against paths relative to the workspace root; a bare directory name excludes the whole subtree. The filter is applied to the initial index, every incremental update and reconciliation, and searches (including the rg fallback, which reads it from the call options rather than the persisted manifest).
+`excludePaths` lists workspace-relative paths or glob patterns the engine must never index or search. Entries are matched against paths relative to the workspace root: a bare directory name matches only a directory at the workspace root (`secret` excludes `secret/**`), so nested directories need their own prefix - e.g. `src/vendor/**` or `docs/generated/**`. The filter is applied to the initial index, every incremental update and reconciliation, and searches (including the rg fallback, which reads it from the call options rather than the persisted manifest).
 
 ```yaml
 config:
   excludePaths:
     - vendor
+    - src/vendor/**
     - docs/generated/**
 ```
 
