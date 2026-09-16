@@ -1,11 +1,15 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { canonicalizeRoot, readWorkspaceConfig } from './config-file.ts'
 import type { ZvecContextItem, ZvecContextResult } from './engine.ts'
-import type { WorkspaceSearchOutcome, WorkspaceSearchRuntime } from './runtime.ts'
+import type { WorkspaceSearchRuntime } from './runtime.ts'
 
 export interface SearchToolConfig {
   defaultLimit: number
   maxLimit: number
 }
+
+/** Score bump for results whose file changed since workspace activation (tie-break magnitude). */
+const RECENCY_BOOST = 0.01
 
 function lineRange(item: ZvecContextItem): { startLine?: number; endLine?: number } {
   const range = item.excerptRange ?? item.range
@@ -34,8 +38,22 @@ function projectResult(result: ZvecContextResult) {
   }
 }
 
-function project(outcome: WorkspaceSearchOutcome) {
-  return outcome.status === 'ready' ? projectResult(outcome.result) : outcome
+/**
+ * Opt-in L2 recency rerank: bumps the score of results whose file changed since workspace
+ * activation by a tie-break magnitude. Only engine-ranked results carry a score; rg-fallback
+ * results are returned unchanged. No-op unless the workspace config sets `recencyBoost: true`.
+ */
+function applyRecencyBoost(runtime: WorkspaceSearchRuntime, root: string, value: ReturnType<typeof projectResult>) {
+  const recent = runtime.recentChangesFor(root)
+  if (recent === undefined || recent.size === 0 || readWorkspaceConfig(root)?.recencyBoost !== true) return value
+  return {
+    ...value,
+    results: value.results.map(item => {
+      if (typeof item.score !== 'number') return item
+      const key = item.path.replaceAll('\\', '/')
+      return recent.has(key) ? { ...item, score: item.score + RECENCY_BOOST } : item
+    }),
+  }
 }
 
 function parseModifiedTime(value: unknown, name: string): number | undefined {
@@ -89,8 +107,9 @@ export function createSearchTool(runtime: WorkspaceSearchRuntime, config: Search
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
     },
     async execute(args, exec) {
-      const root = exec.agent?.session.header.cwd
-      if (!root) throw new Error('zvec_search requires a session workspace')
+      const raw = exec.agent?.session.header.cwd
+      if (!raw) throw new Error('zvec_search requires a session workspace')
+      const root = canonicalizeRoot(raw)
       const limit = args.limit ?? config.defaultLimit
       if (limit < 1 || limit > config.maxLimit) {
         throw new Error(`zvec_search limit must be between 1 and ${config.maxLimit}`)
@@ -100,12 +119,14 @@ export function createSearchTool(runtime: WorkspaceSearchRuntime, config: Search
       if (modifiedAfter !== undefined && modifiedBefore !== undefined && modifiedAfter > modifiedBefore) {
         throw new Error('zvec_search modifiedAfter must not be later than modifiedBefore')
       }
-      return project(await runtime.search(root, {
+      const outcome = await runtime.search(root, {
         query: args.query,
         limit,
         ...(modifiedAfter === undefined ? {} : { modifiedAfter }),
         ...(modifiedBefore === undefined ? {} : { modifiedBefore }),
-      }))
+      })
+      if (outcome.status !== 'ready') return outcome
+      return applyRecencyBoost(runtime, root, projectResult(outcome.result))
     },
   })
 }

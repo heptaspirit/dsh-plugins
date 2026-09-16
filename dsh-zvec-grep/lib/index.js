@@ -322,9 +322,10 @@ function readWorkspaceConfig(root) {
 		const source = parsed;
 		const config = {};
 		if (typeof source.enabled === "boolean") config.enabled = source.enabled;
+		if (typeof source.recencyBoost === "boolean") config.recencyBoost = source.recencyBoost;
 		const scope = sanitizeScope(source.scope);
 		if (scope) config.scope = scope;
-		return config.enabled !== void 0 || config.scope !== void 0 ? config : {};
+		return config.enabled !== void 0 || config.scope !== void 0 || config.recencyBoost !== void 0 ? config : {};
 	} catch {
 		return;
 	}
@@ -381,6 +382,7 @@ function dropWorkspaceIndexStorage(root) {
 
 //#endregion
 //#region src/runtime.ts
+const RECENT_CHANGES_LIMIT = 500;
 const statusMessages = {
 	indexing: "The workspace index is still being built.",
 	refreshing: "The workspace index is being refreshed in the background.",
@@ -409,6 +411,7 @@ var WorkspaceSearchRuntime = class {
 			changedPaths: /* @__PURE__ */ new Set(),
 			fullReconcile: false,
 			pendingRebuild: false,
+			recentChanges: /* @__PURE__ */ new Set(),
 			engineFailed: false
 		};
 		this.workspaces.set(root, state);
@@ -434,6 +437,15 @@ var WorkspaceSearchRuntime = class {
 	statusFor(root) {
 		root = canonicalizeRoot(root);
 		return this.status().find((status) => status.root === root);
+	}
+	/**
+	* Workspace-relative paths changed since activation (bounded LRU), for the opt-in
+	* recencyBoost rerank. `undefined` when the workspace is not active - callers treat that
+	* the same as an empty set.
+	*/
+	recentChangesFor(root) {
+		root = canonicalizeRoot(root);
+		return this.workspaces.get(root)?.recentChanges;
 	}
 	async search(root, options) {
 		root = canonicalizeRoot(root);
@@ -587,6 +599,15 @@ var WorkspaceSearchRuntime = class {
 	queuePath(state, path) {
 		if (state.controller.signal.aborted || state.engineFailed) return;
 		state.changedPaths.add(path);
+		const rel = relative(state.root, path).replaceAll("\\", "/");
+		if (rel.length > 0 && !rel.startsWith("..")) {
+			state.recentChanges.delete(rel);
+			state.recentChanges.add(rel);
+			if (state.recentChanges.size > RECENT_CHANGES_LIMIT) {
+				const oldest = state.recentChanges.values().next();
+				if (oldest.done !== true) state.recentChanges.delete(oldest.value);
+			}
+		}
 		if (state.phase !== "indexing") this.setPhase(state, "refreshing");
 		this.scheduleRefresh(state);
 	}
@@ -654,6 +675,8 @@ var WorkspaceSearchRuntime = class {
 
 //#endregion
 //#region src/tool.ts
+/** Score bump for results whose file changed since workspace activation (tie-break magnitude). */
+const RECENCY_BOOST = .01;
 function lineRange(item) {
 	const range = item.excerptRange ?? item.range;
 	if ("startLine" in range && "endLine" in range) return {
@@ -683,8 +706,25 @@ function projectResult(result) {
 		}))
 	};
 }
-function project(outcome) {
-	return outcome.status === "ready" ? projectResult(outcome.result) : outcome;
+/**
+* Opt-in L2 recency rerank: bumps the score of results whose file changed since workspace
+* activation by a tie-break magnitude. Only engine-ranked results carry a score; rg-fallback
+* results are returned unchanged. No-op unless the workspace config sets `recencyBoost: true`.
+*/
+function applyRecencyBoost(runtime, root, value) {
+	const recent = runtime.recentChangesFor(root);
+	if (recent === void 0 || recent.size === 0 || readWorkspaceConfig(root)?.recencyBoost !== true) return value;
+	return {
+		...value,
+		results: value.results.map((item) => {
+			if (typeof item.score !== "number") return item;
+			const key = item.path.replaceAll("\\", "/");
+			return recent.has(key) ? {
+				...item,
+				score: item.score + RECENCY_BOOST
+			} : item;
+		})
+	};
 }
 function parseModifiedTime(value, name$1) {
 	if (value === void 0) return void 0;
@@ -768,19 +808,22 @@ function createSearchTool(runtime, config) {
 			}]
 		},
 		async execute(args, exec) {
-			const root = exec.agent?.session.header.cwd;
-			if (!root) throw new Error("zvec_search requires a session workspace");
+			const raw = exec.agent?.session.header.cwd;
+			if (!raw) throw new Error("zvec_search requires a session workspace");
+			const root = canonicalizeRoot(raw);
 			const limit = args.limit ?? config.defaultLimit;
 			if (limit < 1 || limit > config.maxLimit) throw new Error(`zvec_search limit must be between 1 and ${config.maxLimit}`);
 			const modifiedAfter = parseModifiedTime(args.modifiedAfter, "modifiedAfter");
 			const modifiedBefore = parseModifiedTime(args.modifiedBefore, "modifiedBefore");
 			if (modifiedAfter !== void 0 && modifiedBefore !== void 0 && modifiedAfter > modifiedBefore) throw new Error("zvec_search modifiedAfter must not be later than modifiedBefore");
-			return project(await runtime.search(root, {
+			const outcome = await runtime.search(root, {
 				query: args.query,
 				limit,
 				...modifiedAfter === void 0 ? {} : { modifiedAfter },
 				...modifiedBefore === void 0 ? {} : { modifiedBefore }
-			}));
+			});
+			if (outcome.status !== "ready") return outcome;
+			return applyRecencyBoost(runtime, root, projectResult(outcome.result));
 		}
 	});
 }
@@ -831,6 +874,7 @@ function createManageTool(deps) {
 					enabled: { type: "boolean" },
 					phase: { type: "string" },
 					scope: { type: "json" },
+					recencyBoost: { type: "boolean" },
 					configPath: { type: "string" },
 					message: {
 						type: "string",
@@ -925,6 +969,7 @@ function createManageTool(deps) {
 						enabled,
 						phase: status?.status ?? "inactive",
 						scope: readWorkspaceConfig(root)?.scope,
+						recencyBoost: readWorkspaceConfig(root)?.recencyBoost === true,
 						configPath,
 						message: status?.message ?? (enabled ? "Indexing is enabled; the workspace is not active in this session yet and will index on first search." : "Indexing is disabled for this workspace; enable it with action \"enable\".")
 					};

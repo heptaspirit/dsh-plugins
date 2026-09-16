@@ -1,4 +1,5 @@
 import { canonicalizeRoot, dropWorkspaceIndexStorage } from './config-file.ts'
+import { relative } from 'node:path'
 import type { WorkspaceScopeConfig } from './config-file.ts'
 import type { SearchEngine, ZvecContextOptions, ZvecContextResult } from './engine.ts'
 
@@ -67,8 +68,16 @@ interface WorkspaceState {
   fullReconcile: boolean
   /** Set by `rebuild()` and consumed by the next refresh pass. */
   pendingRebuild: boolean
+  /**
+   * Workspace-relative paths changed since activation, bounded LRU (oldest evicted at
+   * {@link RECENT_CHANGES_LIMIT}). Explicit filesystem facts used by the opt-in recencyBoost
+   * rerank; cleared when the workspace is deactivated, kept across refresh and reactivate.
+   */
+  recentChanges: Set<string>
   engineFailed: boolean
 }
+
+const RECENT_CHANGES_LIMIT = 500
 
 const statusMessages = {
   indexing: 'The workspace index is still being built.',
@@ -101,6 +110,7 @@ export class WorkspaceSearchRuntime {
       changedPaths: new Set(),
       fullReconcile: false,
       pendingRebuild: false,
+      recentChanges: new Set(),
       engineFailed: false,
     }
     this.workspaces.set(root, state)
@@ -129,6 +139,16 @@ export class WorkspaceSearchRuntime {
   statusFor(root: string): WorkspaceIndexStatus | undefined {
     root = canonicalizeRoot(root)
     return this.status().find(status => status.root === root)
+  }
+
+  /**
+   * Workspace-relative paths changed since activation (bounded LRU), for the opt-in
+   * recencyBoost rerank. `undefined` when the workspace is not active - callers treat that
+   * the same as an empty set.
+   */
+  recentChangesFor(root: string): ReadonlySet<string> | undefined {
+    root = canonicalizeRoot(root)
+    return this.workspaces.get(root)?.recentChanges
   }
 
   async search(root: string, options: ZvecContextOptions): Promise<WorkspaceSearchOutcome> {
@@ -276,6 +296,16 @@ export class WorkspaceSearchRuntime {
   private queuePath(state: WorkspaceState, path: string): void {
     if (state.controller.signal.aborted || state.engineFailed) return
     state.changedPaths.add(path)
+    const rel = relative(state.root, path).replaceAll('\\', '/')
+    if (rel.length > 0 && !rel.startsWith('..')) {
+      // Set insertion order doubles as LRU order: re-adding moves the path to the tail.
+      state.recentChanges.delete(rel)
+      state.recentChanges.add(rel)
+      if (state.recentChanges.size > RECENT_CHANGES_LIMIT) {
+        const oldest = state.recentChanges.values().next()
+        if (oldest.done !== true) state.recentChanges.delete(oldest.value)
+      }
+    }
     if (state.phase !== 'indexing') this.setPhase(state, 'refreshing')
     this.scheduleRefresh(state)
   }

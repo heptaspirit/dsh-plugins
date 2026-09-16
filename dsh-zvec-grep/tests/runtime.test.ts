@@ -375,6 +375,34 @@ describe('WorkspaceSearchRuntime', () => {
       rmSync(root, { recursive: true, force: true })
     }
   })
+
+  it('tracks recent changes as a bounded relative-path set for the recency rerank', async () => {
+    const fixture = harness()
+    fixture.runtime.activate(WORKSPACE)
+    await fixture.runtime.settled(WORKSPACE)
+
+    fixture.callbacks().change(join(WORKSPACE, 'src', 'a.ts'))
+    fixture.callbacks().change(join(WORKSPACE, 'src', 'a.ts')) // re-adding moves the path to the tail
+    fixture.callbacks().change(join(WORKSPACE, 'src', 'b.ts'))
+
+    expect([...fixture.runtime.recentChangesFor(WORKSPACE)!]).toEqual(['src/a.ts', 'src/b.ts'])
+    expect(fixture.runtime.recentChangesFor(canonical('/other-workspace'))).toBeUndefined()
+  })
+
+  it('evicts the oldest recent change beyond the LRU bound and clears the set on deactivate', async () => {
+    const fixture = harness()
+    fixture.runtime.activate(WORKSPACE)
+    await fixture.runtime.settled(WORKSPACE)
+
+    for (let i = 0; i <= 500; i++) fixture.callbacks().change(join(WORKSPACE, `f${i}.ts`))
+    const recent = fixture.runtime.recentChangesFor(WORKSPACE)!
+    expect(recent.size).toBe(500)
+    expect(recent.has('f0.ts')).toBe(false)
+    expect(recent.has('f500.ts')).toBe(true)
+
+    await fixture.runtime.deactivate(WORKSPACE)
+    expect(fixture.runtime.recentChangesFor(WORKSPACE)).toBeUndefined()
+  })
 })
 
 function backend_scope_index(fixture: { backend: SearchEngine }): unknown {

@@ -41,6 +41,11 @@ export type WorkspaceScopeConfig = {
 export interface WorkspaceConfig {
   enabled?: boolean
   scope?: WorkspaceScopeConfig
+  /**
+   * Opt-in recency weighting for `zvec_search` (L2 rerank): when true, results whose file
+   * changed since workspace activation get a small score bump. Default is off.
+   */
+  recencyBoost?: boolean
 }
 
 const STRING_ARRAY_KEYS = ['includePaths', 'excludePaths', 'globs', 'insensitiveGlobs', 'fileTypes', 'excludedFileTypes', 'ignoreFiles'] as const
@@ -98,9 +103,10 @@ export function readWorkspaceConfig(root: string): WorkspaceConfig | undefined {
     const source = parsed as Record<string, unknown>
     const config: WorkspaceConfig = {}
     if (typeof source.enabled === 'boolean') config.enabled = source.enabled
+    if (typeof source.recencyBoost === 'boolean') config.recencyBoost = source.recencyBoost
     const scope = sanitizeScope(source.scope)
     if (scope) config.scope = scope
-    return config.enabled !== undefined || config.scope !== undefined ? config : {}
+    return config.enabled !== undefined || config.scope !== undefined || config.recencyBoost !== undefined ? config : {}
   } catch {
     return undefined
   }

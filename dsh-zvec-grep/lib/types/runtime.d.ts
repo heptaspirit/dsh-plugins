@@ -64,6 +64,12 @@ export declare class WorkspaceSearchRuntime {
     settled(root: string): Promise<void>;
     status(): WorkspaceIndexStatus[];
     statusFor(root: string): WorkspaceIndexStatus | undefined;
+    /**
+     * Workspace-relative paths changed since activation (bounded LRU), for the opt-in
+     * recencyBoost rerank. `undefined` when the workspace is not active - callers treat that
+     * the same as an empty set.
+     */
+    recentChangesFor(root: string): ReadonlySet<string> | undefined;
     search(root: string, options: ZvecContextOptions): Promise<WorkspaceSearchOutcome>;
     /**
      * Re-attempts engine resolution for a workspace whose engine never loaded. The engine loader

@@ -26,6 +26,11 @@ export type WorkspaceScopeConfig = {
 export interface WorkspaceConfig {
     enabled?: boolean;
     scope?: WorkspaceScopeConfig;
+    /**
+     * Opt-in recency weighting for `zvec_search` (L2 rerank): when true, results whose file
+     * changed since workspace activation get a small score bump. Default is off.
+     */
+    recencyBoost?: boolean;
 }
 /** Keeps only well-typed scope fields; an empty or malformed object yields `undefined`. */
 export declare function sanitizeScope(input: unknown): WorkspaceScopeConfig | undefined;
