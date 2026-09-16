@@ -93,8 +93,11 @@ export function createManageTool(deps: ManageToolDeps) {
           return { action: 'drop', root, message: 'Index dropped. Enablement and scope in config.json are kept; the next activation re-indexes from scratch.' }
         }
         case 'scope': {
+          // Host tool output is lossless-JSON validated: an explicit `undefined` property value
+          // fails validation, so an unconfigured scope must omit the key entirely.
+          const current = readWorkspaceConfig(root)?.scope
           if (!isScopeInput(args.scope)) {
-            return { action: 'scope', root, scope: readWorkspaceConfig(root)?.scope, configPath, message: 'Current scope (empty object means engine defaults apply).' }
+            return { action: 'scope', root, ...(current !== undefined ? { scope: current } : {}), configPath, message: 'Current scope (empty object means engine defaults apply).' }
           }
           const scope = sanitizeScope(args.scope)
           if (!scope) {
@@ -109,12 +112,15 @@ export function createManageTool(deps: ManageToolDeps) {
         default: {
           const enabled = deps.isEnabled(root)
           const status = deps.runtime.statusFor(root)
+          const scope = readWorkspaceConfig(root)?.scope
           return {
             action: 'status',
             root,
             enabled,
             phase: status?.status ?? 'inactive',
-            scope: readWorkspaceConfig(root)?.scope,
+            // Lossless-JSON host validation rejects explicit `undefined` property values;
+            // omit the key when the workspace has no configured scope.
+            ...(scope !== undefined ? { scope } : {}),
             recencyBoost: readWorkspaceConfig(root)?.recencyBoost === true,
             configPath,
             message: status?.message ?? (enabled ? 'Indexing is enabled; the workspace is not active in this session yet and will index on first search.' : 'Indexing is disabled for this workspace; enable it with action "enable".'),

@@ -164,6 +164,29 @@ describe('zvec_manage tool', () => {
     expect(existsSync(join(root, INDEX_DIR_NAME))).toBe(true)
   })
 
+  it('omits the scope key when no scope is configured (host lossless-JSON validation)', async () => {
+    const root = workspace('status-noscope')
+    const toolDeps = deps()
+    toolDeps.isEnabled.mockReturnValue(true)
+    toolDeps.runtime.statusFor.mockReturnValue({ root: canonical(root), status: 'ready', pendingChanges: 0, updatedAt: 1 })
+    const tool = createManageTool(toolDeps)
+
+    const status = await tool.execute({ action: 'status' }, exec(root)) as ManageOutcome
+    expect('scope' in status).toBe(false)
+
+    const scopeRead = await tool.execute({ action: 'scope' }, exec(root)) as ManageOutcome
+    expect('scope' in scopeRead).toBe(false)
+
+    // The host validates tool outputs as lossless JSON and rejects explicit `undefined`
+    // property values, so neither outcome may carry one anywhere.
+    const assertNoUndefined = (value: unknown): void => {
+      if (value === undefined) throw new Error('explicit undefined in tool output')
+      if (typeof value === 'object' && value !== null) Object.values(value).forEach(assertNoUndefined)
+    }
+    assertNoUndefined(status)
+    assertNoUndefined(scopeRead)
+  })
+
   it('status reports the recencyBoost flag from config.json', async () => {
     const on = workspace('status-recency-on')
     mkdirSync(join(on, INDEX_DIR_NAME), { recursive: true })

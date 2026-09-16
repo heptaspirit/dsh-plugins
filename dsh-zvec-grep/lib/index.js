@@ -941,10 +941,11 @@ function createManageTool(deps) {
 						message: "Index dropped. Enablement and scope in config.json are kept; the next activation re-indexes from scratch."
 					};
 				case "scope": {
+					const current = readWorkspaceConfig(root)?.scope;
 					if (!isScopeInput(args.scope)) return {
 						action: "scope",
 						root,
-						scope: readWorkspaceConfig(root)?.scope,
+						...current !== void 0 ? { scope: current } : {},
 						configPath,
 						message: "Current scope (empty object means engine defaults apply)."
 					};
@@ -963,12 +964,13 @@ function createManageTool(deps) {
 				default: {
 					const enabled = deps.isEnabled(root);
 					const status = deps.runtime.statusFor(root);
+					const scope = readWorkspaceConfig(root)?.scope;
 					return {
 						action: "status",
 						root,
 						enabled,
 						phase: status?.status ?? "inactive",
-						scope: readWorkspaceConfig(root)?.scope,
+						...scope !== void 0 ? { scope } : {},
 						recencyBoost: readWorkspaceConfig(root)?.recencyBoost === true,
 						configPath,
 						message: status?.message ?? (enabled ? "Indexing is enabled; the workspace is not active in this session yet and will index on first search." : "Indexing is disabled for this workspace; enable it with action \"enable\".")
