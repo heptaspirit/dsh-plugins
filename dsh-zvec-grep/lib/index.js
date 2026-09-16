@@ -686,6 +686,12 @@ function projectResult(result) {
 function project(outcome) {
 	return outcome.status === "ready" ? projectResult(outcome.result) : outcome;
 }
+function parseModifiedTime(value, name$1) {
+	if (value === void 0) return void 0;
+	const time = Date.parse(String(value));
+	if (Number.isNaN(time)) throw new Error(`zvec_search ${name$1} must be an ISO 8601 timestamp or date, got: ${String(value)}`);
+	return time;
+}
 function createSearchTool(runtime, config) {
 	return defineTool({
 		name: "zvec_search",
@@ -699,6 +705,14 @@ function createSearchTool(runtime, config) {
 			limit: {
 				type: "integer",
 				description: `Maximum results, from 1 to ${config.maxLimit}. Defaults to ${config.defaultLimit}.`
+			},
+			modifiedAfter: {
+				type: "string",
+				description: "Only include files modified at or after this time: an ISO 8601 date or timestamp, e.g. 2026-09-15 or 2026-09-15T10:00:00Z."
+			},
+			modifiedBefore: {
+				type: "string",
+				description: "Only include files modified at or before this time: an ISO 8601 date or timestamp."
 			}
 		},
 		output: {
@@ -758,9 +772,14 @@ function createSearchTool(runtime, config) {
 			if (!root) throw new Error("zvec_search requires a session workspace");
 			const limit = args.limit ?? config.defaultLimit;
 			if (limit < 1 || limit > config.maxLimit) throw new Error(`zvec_search limit must be between 1 and ${config.maxLimit}`);
+			const modifiedAfter = parseModifiedTime(args.modifiedAfter, "modifiedAfter");
+			const modifiedBefore = parseModifiedTime(args.modifiedBefore, "modifiedBefore");
+			if (modifiedAfter !== void 0 && modifiedBefore !== void 0 && modifiedAfter > modifiedBefore) throw new Error("zvec_search modifiedAfter must not be later than modifiedBefore");
 			return project(await runtime.search(root, {
 				query: args.query,
-				limit
+				limit,
+				...modifiedAfter === void 0 ? {} : { modifiedAfter },
+				...modifiedBefore === void 0 ? {} : { modifiedBefore }
 			}));
 		}
 	});

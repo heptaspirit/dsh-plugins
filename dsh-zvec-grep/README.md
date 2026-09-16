@@ -75,6 +75,8 @@ The first workspace may download the default local embedding model. Indexes are 
 
 Use it when wording or location is unknown, or when the question requires architecture, relationships, control flow, design rationale, or synthesis across files. Use Harness' exact grep for known identifiers, literals, regular expressions, configuration keys, error messages, and exhaustive occurrence lists.
 
+Optional time filters narrow results to files modified in a window: pass `modifiedAfter` and/or `modifiedBefore` as ISO 8601 dates or timestamps (e.g. `2026-09-15` or `2026-09-15T10:00:00Z`). Both bounds together must form a non-empty window.
+
 `zvec_manage` governs the calling session's workspace index:
 
 - `enable` / `disable` persist the toggle in `config.json` and start or stop indexing. A disabled workspace makes `zvec_search` report `status: disabled` instead of searching; do not retry, enable the workspace first.

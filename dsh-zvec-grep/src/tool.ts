@@ -38,6 +38,15 @@ function project(outcome: WorkspaceSearchOutcome) {
   return outcome.status === 'ready' ? projectResult(outcome.result) : outcome
 }
 
+function parseModifiedTime(value: unknown, name: string): number | undefined {
+  if (value === undefined) return undefined
+  const time = Date.parse(String(value))
+  if (Number.isNaN(time)) {
+    throw new Error(`zvec_search ${name} must be an ISO 8601 timestamp or date, got: ${String(value)}`)
+  }
+  return time
+}
+
 export function createSearchTool(runtime: WorkspaceSearchRuntime, config: SearchToolConfig) {
   return defineTool({
     name: 'zvec_search',
@@ -45,6 +54,8 @@ export function createSearchTool(runtime: WorkspaceSearchRuntime, config: Search
     parameters: {
       query: { type: 'string', required: true, description: 'Natural-language search intent.' },
       limit: { type: 'integer', description: `Maximum results, from 1 to ${config.maxLimit}. Defaults to ${config.defaultLimit}.` },
+      modifiedAfter: { type: 'string', description: 'Only include files modified at or after this time: an ISO 8601 date or timestamp, e.g. 2026-09-15 or 2026-09-15T10:00:00Z.' },
+      modifiedBefore: { type: 'string', description: 'Only include files modified at or before this time: an ISO 8601 date or timestamp.' },
     },
     output: {
       schema: {
@@ -84,7 +95,17 @@ export function createSearchTool(runtime: WorkspaceSearchRuntime, config: Search
       if (limit < 1 || limit > config.maxLimit) {
         throw new Error(`zvec_search limit must be between 1 and ${config.maxLimit}`)
       }
-      return project(await runtime.search(root, { query: args.query, limit }))
+      const modifiedAfter = parseModifiedTime(args.modifiedAfter, 'modifiedAfter')
+      const modifiedBefore = parseModifiedTime(args.modifiedBefore, 'modifiedBefore')
+      if (modifiedAfter !== undefined && modifiedBefore !== undefined && modifiedAfter > modifiedBefore) {
+        throw new Error('zvec_search modifiedAfter must not be later than modifiedBefore')
+      }
+      return project(await runtime.search(root, {
+        query: args.query,
+        limit,
+        ...(modifiedAfter === undefined ? {} : { modifiedAfter }),
+        ...(modifiedBefore === undefined ? {} : { modifiedBefore }),
+      }))
     },
   })
 }

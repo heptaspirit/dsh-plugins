@@ -56,6 +56,10 @@ export interface ZvecContextOptions {
     autoUpdate?: boolean;
     /** Same filter set as `index`; the rg fallback reads it from call options, not the manifest. */
     excludePaths?: readonly string[];
+    /** Epoch milliseconds; only files modified at or after this time (engine validates the window). */
+    modifiedAfter?: number;
+    /** Epoch milliseconds; only files modified at or before this time. */
+    modifiedBefore?: number;
 }
 export interface ZvecEngineOptions {
     root: string;
