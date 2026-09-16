@@ -50,7 +50,7 @@ The settings **Plugins** page has a **Zvec Search** card listing every workspace
 
 ## Enabling a workspace
 
-Indexing is **opt-in per workspace**. A workspace with no configuration and no previous index stays off: sessions start without an engine, a watcher, or an embedding-model download, and `zvec_search` returns a structured `disabled` status instead of building anything.
+Indexing is **opt-in per workspace**. A workspace with no configuration and no previous index stays off: sessions start without an engine, a watcher, or an embedding-model download, and `zvec_search` returns a structured `disabled` status instead of building anything. The full per-workspace configuration reference lives in [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 To turn a workspace on, either:
 
@@ -121,7 +121,7 @@ Sessions sharing a workspace reuse one in-process engine, watcher, and indexing 
 
 ## Configuration
 
-The bundled defaults work without configuration:
+The bundled defaults work without configuration. For the complete per-workspace `config.json` reference (enablement, scope, recencyBoost), see [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ```yaml
 - id: zvec-grep
