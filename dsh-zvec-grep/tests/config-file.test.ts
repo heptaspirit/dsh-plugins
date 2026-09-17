@@ -38,17 +38,6 @@ describe('workspace config file', () => {
     expect(readWorkspaceConfig(root)).toEqual({ enabled: true })
   })
 
-  it('round-trips the recencyBoost flag next to enabled', () => {
-    const root = workspace('recency')
-
-    writeWorkspaceConfig(root, { enabled: true, recencyBoost: true })
-    expect(readWorkspaceConfig(root)).toEqual({ enabled: true, recencyBoost: true })
-
-    writeWorkspaceConfig(root, { enabled: true })
-    expect(readWorkspaceConfig(root)).toEqual({ enabled: true })
-    expect(resolveEnabled(root, false)).toBe(true)
-  })
-
   it('follows the three enablement rules: config wins, manifest grandfathers, else default', () => {
     // Rule 3: neither file exists -> default.
     const fresh = workspace('fresh')

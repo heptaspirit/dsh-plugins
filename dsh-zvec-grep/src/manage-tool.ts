@@ -16,7 +16,6 @@ export interface ManageOutcome {
   enabled?: boolean
   phase?: WorkspaceIndexStatus['status'] | 'inactive'
   scope?: WorkspaceScopeConfig
-  recencyBoost?: boolean
   configPath?: string
   message: string
 }
@@ -53,7 +52,6 @@ export function createManageTool(deps: ManageToolDeps) {
           enabled: { type: 'boolean' },
           phase: { type: 'string' },
           scope: { type: 'json' },
-          recencyBoost: { type: 'boolean' },
           configPath: { type: 'string' },
           message: { type: 'string', required: true },
         },
@@ -121,7 +119,6 @@ export function createManageTool(deps: ManageToolDeps) {
             // Lossless-JSON host validation rejects explicit `undefined` property values;
             // omit the key when the workspace has no configured scope.
             ...(scope !== undefined ? { scope } : {}),
-            recencyBoost: readWorkspaceConfig(root)?.recencyBoost === true,
             configPath,
             message: status?.message ?? (enabled ? 'Indexing is enabled; the workspace is not active in this session yet and will index on first search.' : 'Indexing is disabled for this workspace; enable it with action "enable".'),
           }

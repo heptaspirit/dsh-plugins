@@ -11,7 +11,6 @@ export interface ManageOutcome {
     enabled?: boolean;
     phase?: WorkspaceIndexStatus['status'] | 'inactive';
     scope?: WorkspaceScopeConfig;
-    recencyBoost?: boolean;
     configPath?: string;
     message: string;
 }

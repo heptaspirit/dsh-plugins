@@ -86,8 +86,6 @@ Optional time filters narrow results to files modified in a window: pass `modifi
 
 All actions operate on the session's own workspace; the tool cannot touch other directories.
 
-Opt-in recency weighting: set `"recencyBoost": true` in the workspace `config.json` (the same file that stores `enabled` and `scope`; `zvec_manage status` reports it) to bump the score of results whose file changed since the workspace was activated - a tie-break-sized nudge that surfaces files you have been editing without reordering the engine's ranked results. It is off by default and never applies to rg-fallback results, which carry no engine score.
-
 ### Workspace scope
 
 The scope controls which files the index covers, per workspace. It is persisted in `config.json` next to the `enabled` flag and supports the engine's filter set: `includePaths`, `excludePaths`, `globs`, `insensitiveGlobs`, `fileTypes`, `excludedFileTypes`, `ignoreFiles`, `maxDepth`, `maxFileSizeBytes`, `follow`, `hidden`, `noIgnore`, and `embeddingConcurrency`.
@@ -121,7 +119,7 @@ Sessions sharing a workspace reuse one in-process engine, watcher, and indexing 
 
 ## Configuration
 
-The bundled defaults work without configuration. For the complete per-workspace `config.json` reference (enablement, scope, recencyBoost), see [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+The bundled defaults work without configuration. For the complete per-workspace `config.json` reference (enablement, scope), see [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ```yaml
 - id: zvec-grep

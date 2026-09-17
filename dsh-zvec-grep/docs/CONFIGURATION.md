@@ -14,7 +14,6 @@ The plugin has two configuration layers:
 // Full example
 {
   "enabled": true,
-  "recencyBoost": false,
   "scope": {
     "excludePaths": ["src/vendor/**", "docs/generated/**"],
     "maxDepth": 12
@@ -30,7 +29,6 @@ The file is plain JSON. You can edit it while Harness is running — changes tak
 |---|---|---|---|
 | `enabled` | boolean | *(see rules below)* | Authoritative on/off switch for this workspace's index. |
 | `scope` | object | `{}` (engine defaults) | Which files the index covers. See [Workspace scope](#workspace-scope). |
-| `recencyBoost` | boolean | `false` | Opt-in recency weighting for `zvec_search`. See [recencyBoost](#recencyboost). |
 
 ### Enablement rules
 
@@ -45,7 +43,7 @@ Deleting the whole `.zvec-grep/` directory returns the workspace to the default 
 ### Robustness rules
 
 - A **malformed or unreadable `config.json`** is treated as missing: the workspace falls back to rule 2/3 above. A broken config never strands a working workspace on the wrong side of the toggle.
-- **Unknown top-level fields are dropped**; `enabled` and `recencyBoost` must be JSON booleans.
+- **Unknown top-level fields are dropped**; `enabled` must be a JSON boolean.
 - **`scope` fields are type-checked individually**: a field with the wrong type is dropped, and a scope object with no valid field at all is discarded entirely (the workspace runs on engine defaults).
 - Note that `"scope": {}` (an empty object) carries no information and is **not persisted** — write at least one scope field to make the key meaningful.
 
@@ -80,22 +78,13 @@ The workspace scope merges over the plugin-global config on every engine call:
 
 Every index pass sends the complete merged scope with a path-filter reset, so the engine's persisted manifest always mirrors the current scope — clearing a scope field really clears it, and edits take effect on the next index pass **without restarting Harness**.
 
-## recencyBoost
-
-Opt-in recency weighting for `zvec_search`. Set `"recencyBoost": true` in the workspace `config.json` to bump the score of results whose file changed since the workspace was activated — a tie-break-sized nudge (`+0.01`) that surfaces files you have been editing without reordering the engine's ranked results.
-
-- Off by default; per workspace.
-- Never applies to rg-fallback results, which carry no engine score.
-- The change set is capped (LRU, 500 paths) and survives index refreshes; it resets when the workspace is deactivated or dropped.
-- `zvec_manage status` reports the current flag.
-
 ## Managing config with `zvec_manage`
 
 | Action | Effect on `config.json` / index |
 |---|---|
 | `enable` | Writes `"enabled": true` and starts indexing in the background. |
 | `disable` | Writes `"enabled": false` and stops indexing (config and index stay on disk). |
-| `status` | Read-only: reports `enabled`, index phase, configured `scope`, and `recencyBoost`. |
+| `status` | Read-only: reports `enabled`, index phase, and configured `scope`. |
 | `rebuild` | Queues a full re-embed; config untouched. |
 | `drop` | Deletes index storage (manifest, embedding stores); **keeps `config.json`**, so enablement and scope survive. |
 | `scope` | With no argument: reads the current scope. With a `scope` object: **replaces** the persisted scope wholesale (no deep merge) and queues a rescan. |

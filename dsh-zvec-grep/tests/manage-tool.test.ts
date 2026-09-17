@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest'
@@ -185,19 +185,5 @@ describe('zvec_manage tool', () => {
     }
     assertNoUndefined(status)
     assertNoUndefined(scopeRead)
-  })
-
-  it('status reports the recencyBoost flag from config.json', async () => {
-    const on = workspace('status-recency-on')
-    mkdirSync(join(on, INDEX_DIR_NAME), { recursive: true })
-    writeFileSync(workspaceConfigPath(on), JSON.stringify({ recencyBoost: true }), 'utf8')
-    const tool = createManageTool(deps())
-
-    const onOutcome = await tool.execute({ action: 'status' }, exec(on)) as ManageOutcome
-    expect(onOutcome).toEqual(expect.objectContaining({ action: 'status', recencyBoost: true }))
-
-    const off = workspace('status-recency-off')
-    const offOutcome = await tool.execute({ action: 'status' }, exec(off)) as ManageOutcome
-    expect(offOutcome).toEqual(expect.objectContaining({ action: 'status', recencyBoost: false }))
   })
 })
