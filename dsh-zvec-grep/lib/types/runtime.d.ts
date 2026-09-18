@@ -1,6 +1,6 @@
 import type { WorkspaceScopeConfig } from './config-file.ts';
-import type { SearchEngine, ZvecContextOptions, ZvecContextResult } from './engine.ts';
-export type { SearchEngine } from './engine.ts';
+import type { SearchEngine, ZvecContextOptions, ZvecContextResult, ZvecIndexProgress } from './engine.ts';
+export type { SearchEngine, ZvecIndexProgress } from './engine.ts';
 export interface WorkspaceWatcher {
     ready?: Promise<void>;
     close(): void | Promise<void>;
@@ -35,6 +35,8 @@ export interface WorkspaceIndexStatus {
     pendingChanges: number;
     updatedAt: number;
     message?: string;
+    /** Latest engine index progress (scan counts, embedding download); absent until one arrives. */
+    progress?: ZvecIndexProgress;
 }
 export interface WorkspaceSearchRuntimeOptions {
     create(root: string): Promise<SearchEngine>;
@@ -102,6 +104,11 @@ export declare class WorkspaceSearchRuntime {
     private scheduleRefresh;
     private refresh;
     private setPhase;
+    /**
+     * Stores the latest engine index progress for status polling. The engine owns the snapshot it
+     * passes in, so the runtime keeps its own shallow copy and never mutates or exposes it further.
+     */
+    private recordProgress;
     /**
      * The engine options for one workspace, recomputed per call: global `excludePaths` plus the
      * workspace scope, so a config edit takes effect without deactivating the workspace. Every

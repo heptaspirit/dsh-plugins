@@ -4,7 +4,7 @@ import { IndexStatusSource, requestScopeSave, requestWorkspaceToggle } from '../
 afterEach(() => vi.useRealTimers())
 
 function payload(workspaces: unknown[], pollIntervalMs = 750): Response {
-  return new Response(JSON.stringify({ version: 4, pollIntervalMs, workspaces }), {
+  return new Response(JSON.stringify({ version: 5, pollIntervalMs, workspaces }), {
     status: 200,
     headers: { 'content-type': 'application/json' },
   })
@@ -154,7 +154,7 @@ describe('IndexStatusSource', () => {
     }
   })
 
-  it('accepts a disabled workspace phase and enablement/scope fields from the v4 payload', async () => {
+  it('accepts a disabled workspace phase and enablement/scope fields from the v5 payload', async () => {
     vi.useFakeTimers()
     const source = new IndexStatusSource(vi.fn(async () => payload([
       { root: '/repo', status: 'disabled', pendingChanges: 0, updatedAt: 0, enabled: false, scope: { excludePaths: ['dist'] } },

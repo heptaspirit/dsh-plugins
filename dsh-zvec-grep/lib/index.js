@@ -428,6 +428,7 @@ var WorkspaceSearchRuntime = class {
 			status: state.phase,
 			pendingChanges: state.changedPaths.size + (state.fullReconcile ? 1 : 0),
 			updatedAt: state.updatedAt,
+			...state.progress ? { progress: state.progress } : {},
 			...state.phase === "error" ? { message: errorMessage(state.error) } : {}
 		}));
 	}
@@ -568,6 +569,7 @@ var WorkspaceSearchRuntime = class {
 				root: state.root,
 				signal: state.controller.signal,
 				resetPaths: true,
+				onProgress: (progress) => this.recordProgress(state, progress),
 				...this.engineOptions(state.root)
 			});
 			this.setPhase(state, state.changedPaths.size > 0 || state.fullReconcile ? "refreshing" : "ready");
@@ -619,6 +621,7 @@ var WorkspaceSearchRuntime = class {
 			await (await state.engine).index({
 				root: state.root,
 				signal: state.controller.signal,
+				onProgress: (progress) => this.recordProgress(state, progress),
 				...fullReconcile ? { resetPaths: true } : {},
 				...rebuild ? { rebuild: true } : {},
 				...fullReconcile || rebuild ? {} : { changedPaths },
@@ -634,6 +637,17 @@ var WorkspaceSearchRuntime = class {
 		if (state.phase === phase) return;
 		state.phase = phase;
 		state.updatedAt = Date.now();
+	}
+	/**
+	* Stores the latest engine index progress for status polling. The engine owns the snapshot it
+	* passes in, so the runtime keeps its own shallow copy and never mutates or exposes it further.
+	*/
+	recordProgress(state, progress) {
+		if (state.controller.signal.aborted) return;
+		state.progress = {
+			...progress,
+			...progress.embedding === void 0 ? {} : { embedding: { ...progress.embedding } }
+		};
 	}
 	/**
 	* The engine options for one workspace, recomputed per call: global `excludePaths` plus the
@@ -679,7 +693,9 @@ function projectResult(result) {
 			content: item.content,
 			status: item.status,
 			matchedBy: Array.isArray(item.matchedBy) ? item.matchedBy.join(",") : String(item.matchedBy),
-			...item.score === void 0 ? {} : { score: item.score }
+			...item.score === void 0 ? {} : { score: item.score },
+			...item.metadata === void 0 ? {} : { metadata: projectMetadata(item.metadata) },
+			...item.trace === void 0 ? {} : { trace: projectTrace(item.trace) }
 		}))
 	};
 }
@@ -691,6 +707,55 @@ function parseModifiedTime(value, name$1) {
 	const time = Date.parse(String(value));
 	if (Number.isNaN(time)) throw new Error(`zvec_search ${name$1} must be an ISO 8601 timestamp or date, got: ${String(value)}`);
 	return time;
+}
+const ZVEC_SYMBOL_TYPES = [
+	"module",
+	"class",
+	"interface",
+	"function",
+	"value",
+	"alias"
+];
+function parseSymbolTypes(value) {
+	if (value === void 0) return void 0;
+	if (!Array.isArray(value)) throw new Error("zvec_search symbolTypes must be an array of symbol types");
+	for (const entry of value) if (typeof entry !== "string" || !ZVEC_SYMBOL_TYPES.includes(entry)) throw new Error(`zvec_search symbolTypes accepts only: ${ZVEC_SYMBOL_TYPES.join(", ")}`);
+	return [...new Set(value)];
+}
+/** Drops nullish keys recursively so engine data never reaches the host as undefined values. */
+function pruneNullish(value) {
+	if (Array.isArray(value)) return value.map((item) => pruneNullish(item));
+	if (value !== null && typeof value === "object") {
+		const out = {};
+		for (const [key, entry] of Object.entries(value)) if (entry !== void 0 && entry !== null) out[key] = pruneNullish(entry);
+		return out;
+	}
+	return value;
+}
+function projectMetadata(metadata) {
+	if (metadata.kind === "code") return {
+		kind: metadata.kind,
+		symbolType: metadata.symbolType,
+		...metadata.symbolName === null ? {} : { symbolName: metadata.symbolName },
+		...metadata.scope === null ? {} : { scope: metadata.scope },
+		...metadata.signature === null ? {} : { signature: metadata.signature },
+		...metadata.doc === null ? {} : { doc: metadata.doc },
+		modifiers: [...metadata.modifiers]
+	};
+	return {
+		kind: metadata.kind,
+		...metadata.heading === null ? {} : { heading: metadata.heading },
+		...metadata.level === null ? {} : { level: metadata.level },
+		...metadata.scope === null ? {} : { scope: metadata.scope }
+	};
+}
+function projectTrace(trace) {
+	return {
+		recall: trace.recall.map((entry) => pruneNullish({ ...entry })),
+		...trace.fusion === void 0 ? {} : { fusion: pruneNullish({ ...trace.fusion }) },
+		...trace.ranking === void 0 ? {} : { ranking: pruneNullish({ ...trace.ranking }) },
+		final: pruneNullish({ ...trace.final })
+	};
 }
 function createSearchTool(runtime, config) {
 	return defineTool({
@@ -713,6 +778,18 @@ function createSearchTool(runtime, config) {
 			modifiedBefore: {
 				type: "string",
 				description: "Only include files modified at or before this time: an ISO 8601 date or timestamp."
+			},
+			trace: {
+				type: "boolean",
+				description: "Include per-hit retrieval diagnostics (recall routes, fusion, ranking) on each result; use to debug retrieval quality."
+			},
+			preferSymbol: {
+				type: "boolean",
+				description: "Prefer indexed code symbols over surrounding prose fragments."
+			},
+			symbolTypes: {
+				type: "array",
+				description: `With preferSymbol, restrict the symbol preference to these types: ${ZVEC_SYMBOL_TYPES.join(", ")}.`
 			}
 		},
 		output: {
@@ -756,7 +833,101 @@ function createSearchTool(runtime, config) {
 									type: "string",
 									required: true
 								},
-								score: { type: "number" }
+								score: { type: "number" },
+								metadata: {
+									type: "object",
+									additionalProperties: false,
+									properties: {
+										kind: {
+											type: "string",
+											required: true
+										},
+										symbolType: { type: "string" },
+										symbolName: { type: "string" },
+										scope: { type: "string" },
+										signature: { type: "string" },
+										doc: { type: "string" },
+										modifiers: {
+											type: "array",
+											items: { type: "string" }
+										},
+										heading: { type: "string" },
+										level: { type: "integer" }
+									}
+								},
+								trace: {
+									type: "object",
+									additionalProperties: false,
+									properties: {
+										recall: {
+											type: "array",
+											items: {
+												type: "object",
+												additionalProperties: false,
+												properties: {
+													path: {
+														type: "string",
+														required: true
+													},
+													routeId: { type: "string" },
+													query: { type: "string" },
+													found: {
+														type: "boolean",
+														required: true
+													},
+													forced: { type: "boolean" },
+													rank: { type: "integer" },
+													score: { type: "number" },
+													reason: { type: "string" }
+												}
+											}
+										},
+										fusion: {
+											type: "object",
+											additionalProperties: false,
+											properties: {
+												rank: {
+													type: "integer",
+													required: true
+												},
+												score: {
+													type: "number",
+													required: true
+												},
+												forced: { type: "boolean" }
+											}
+										},
+										ranking: {
+											type: "object",
+											additionalProperties: false,
+											properties: {
+												rank: {
+													type: "integer",
+													required: true
+												},
+												score: {
+													type: "number",
+													required: true
+												},
+												forced: { type: "boolean" }
+											}
+										},
+										final: {
+											type: "object",
+											additionalProperties: false,
+											properties: {
+												returnedByLimit: {
+													type: "boolean",
+													required: true
+												},
+												cutoffRank: {
+													type: "integer",
+													required: true
+												}
+											}
+										}
+									}
+								}
 							}
 						}
 					}
@@ -775,9 +946,13 @@ function createSearchTool(runtime, config) {
 			const modifiedAfter = parseModifiedTime(args.modifiedAfter, "modifiedAfter");
 			const modifiedBefore = parseModifiedTime(args.modifiedBefore, "modifiedBefore");
 			if (modifiedAfter !== void 0 && modifiedBefore !== void 0 && modifiedAfter > modifiedBefore) throw new Error("zvec_search modifiedAfter must not be later than modifiedBefore");
+			const symbolTypes = parseSymbolTypes(args.symbolTypes);
 			return project(await runtime.search(root, {
 				query: args.query,
 				limit,
+				...args.trace === void 0 ? {} : { trace: args.trace },
+				...args.preferSymbol === void 0 ? {} : { preferSymbol: args.preferSymbol },
+				...symbolTypes === void 0 ? {} : { symbolTypes },
 				...modifiedAfter === void 0 ? {} : { modifiedAfter },
 				...modifiedBefore === void 0 ? {} : { modifiedBefore }
 			}));
@@ -986,6 +1161,7 @@ function registerStatusRoute(connection, runtime, sessions, pollIntervalMs, isEn
 					status: "disabled",
 					pendingChanges: 0,
 					updatedAt: 0,
+					progress: null,
 					...shared
 				};
 				const internal = runtime.statusFor(root);
@@ -994,18 +1170,20 @@ function registerStatusRoute(connection, runtime, sessions, pollIntervalMs, isEn
 					status: "indexing",
 					pendingChanges: 0,
 					updatedAt: 0,
+					progress: null,
 					...shared
 				} : {
 					root,
 					status: internal.status,
 					pendingChanges: internal.pendingChanges,
 					updatedAt: internal.updatedAt,
+					progress: internal.progress ?? null,
 					...internal.status === "error" ? { errorCode: "index_failed" } : {},
 					...shared
 				};
 			});
 			return new Response(JSON.stringify({
-				version: 4,
+				version: 5,
 				pollIntervalMs,
 				...engine === void 0 ? {} : { engine },
 				workspaces

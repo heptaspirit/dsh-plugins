@@ -1,5 +1,13 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { ZvecContextItem, ZvecContextResult } from './engine.ts'
+import type {
+  ZvecCodeSymbolType,
+  ZvecContextItem,
+  ZvecContextResult,
+  ZvecEntityMetadata,
+  ZvecSearchHitTrace,
+  ZvecSearchRecallTrace,
+  ZvecSearchStageTrace,
+} from './engine.ts'
 import type { WorkspaceSearchOutcome, WorkspaceSearchRuntime } from './runtime.ts'
 
 export interface SearchToolConfig {
@@ -30,6 +38,8 @@ function projectResult(result: ZvecContextResult) {
       status: item.status,
       matchedBy: Array.isArray(item.matchedBy) ? item.matchedBy.join(',') : String(item.matchedBy),
       ...(item.score === undefined ? {} : { score: item.score }),
+      ...(item.metadata === undefined ? {} : { metadata: projectMetadata(item.metadata) }),
+      ...(item.trace === undefined ? {} : { trace: projectTrace(item.trace) }),
     })),
   }
 }
@@ -47,6 +57,84 @@ function parseModifiedTime(value: unknown, name: string): number | undefined {
   return time
 }
 
+const ZVEC_SYMBOL_TYPES: readonly ZvecCodeSymbolType[] = ['module', 'class', 'interface', 'function', 'value', 'alias']
+
+function parseSymbolTypes(value: unknown): ZvecCodeSymbolType[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) {
+    throw new Error('zvec_search symbolTypes must be an array of symbol types')
+  }
+  for (const entry of value) {
+    if (typeof entry !== 'string' || !ZVEC_SYMBOL_TYPES.includes(entry as ZvecCodeSymbolType)) {
+      throw new Error(`zvec_search symbolTypes accepts only: ${ZVEC_SYMBOL_TYPES.join(', ')}`)
+    }
+  }
+  return [...new Set(value as ZvecCodeSymbolType[])]
+}
+
+/** Drops nullish keys recursively so engine data never reaches the host as undefined values. */
+function pruneNullish<T>(value: T): T {
+  if (Array.isArray(value)) return value.map(item => pruneNullish(item)) as T
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [key, entry] of Object.entries(value)) {
+      if (entry !== undefined && entry !== null) out[key] = pruneNullish(entry)
+    }
+    return out as T
+  }
+  return value
+}
+
+/** Output shape of the tool schema's `metadata` property; nullish engine fields are omitted. */
+interface ProjectedMetadata {
+  kind: string
+  scope?: string
+  symbolType?: string
+  symbolName?: string
+  signature?: string
+  doc?: string
+  modifiers?: string[]
+  heading?: string
+  level?: number
+}
+
+function projectMetadata(metadata: ZvecEntityMetadata): ProjectedMetadata {
+  if (metadata.kind === 'code') {
+    return {
+      kind: metadata.kind,
+      symbolType: metadata.symbolType,
+      ...(metadata.symbolName === null ? {} : { symbolName: metadata.symbolName }),
+      ...(metadata.scope === null ? {} : { scope: metadata.scope }),
+      ...(metadata.signature === null ? {} : { signature: metadata.signature }),
+      ...(metadata.doc === null ? {} : { doc: metadata.doc }),
+      modifiers: [...metadata.modifiers],
+    }
+  }
+  return {
+    kind: metadata.kind,
+    ...(metadata.heading === null ? {} : { heading: metadata.heading }),
+    ...(metadata.level === null ? {} : { level: metadata.level }),
+    ...(metadata.scope === null ? {} : { scope: metadata.scope }),
+  }
+}
+
+/** Output shape of the tool schema's `trace` property. */
+interface ProjectedTrace {
+  recall?: ZvecSearchRecallTrace[]
+  fusion?: ZvecSearchStageTrace
+  ranking?: ZvecSearchStageTrace
+  final?: ZvecSearchHitTrace['final']
+}
+
+function projectTrace(trace: ZvecSearchHitTrace): ProjectedTrace {
+  return {
+    recall: trace.recall.map(entry => pruneNullish({ ...entry })),
+    ...(trace.fusion === undefined ? {} : { fusion: pruneNullish({ ...trace.fusion }) }),
+    ...(trace.ranking === undefined ? {} : { ranking: pruneNullish({ ...trace.ranking }) }),
+    final: pruneNullish({ ...trace.final }),
+  }
+}
+
 export function createSearchTool(runtime: WorkspaceSearchRuntime, config: SearchToolConfig) {
   return defineTool({
     name: 'zvec_search',
@@ -56,6 +144,9 @@ export function createSearchTool(runtime: WorkspaceSearchRuntime, config: Search
       limit: { type: 'integer', description: `Maximum results, from 1 to ${config.maxLimit}. Defaults to ${config.defaultLimit}.` },
       modifiedAfter: { type: 'string', description: 'Only include files modified at or after this time: an ISO 8601 date or timestamp, e.g. 2026-09-15 or 2026-09-15T10:00:00Z.' },
       modifiedBefore: { type: 'string', description: 'Only include files modified at or before this time: an ISO 8601 date or timestamp.' },
+      trace: { type: 'boolean', description: 'Include per-hit retrieval diagnostics (recall routes, fusion, ranking) on each result; use to debug retrieval quality.' },
+      preferSymbol: { type: 'boolean', description: 'Prefer indexed code symbols over surrounding prose fragments.' },
+      symbolTypes: { type: 'array', description: `With preferSymbol, restrict the symbol preference to these types: ${ZVEC_SYMBOL_TYPES.join(', ')}.` },
     },
     output: {
       schema: {
@@ -81,6 +172,59 @@ export function createSearchTool(runtime: WorkspaceSearchRuntime, config: Search
                 status: { type: 'string', required: true },
                 matchedBy: { type: 'string', required: true },
                 score: { type: 'number' },
+                metadata: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    kind: { type: 'string', required: true },
+                    symbolType: { type: 'string' },
+                    symbolName: { type: 'string' },
+                    scope: { type: 'string' },
+                    signature: { type: 'string' },
+                    doc: { type: 'string' },
+                    modifiers: { type: 'array', items: { type: 'string' } },
+                    heading: { type: 'string' },
+                    level: { type: 'integer' },
+                  },
+                },
+                trace: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    recall: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        additionalProperties: false,
+                        properties: {
+                          path: { type: 'string', required: true },
+                          routeId: { type: 'string' },
+                          query: { type: 'string' },
+                          found: { type: 'boolean', required: true },
+                          forced: { type: 'boolean' },
+                          rank: { type: 'integer' },
+                          score: { type: 'number' },
+                          reason: { type: 'string' },
+                        },
+                      },
+                    },
+                    fusion: {
+                      type: 'object',
+                      additionalProperties: false,
+                      properties: { rank: { type: 'integer', required: true }, score: { type: 'number', required: true }, forced: { type: 'boolean' } },
+                    },
+                    ranking: {
+                      type: 'object',
+                      additionalProperties: false,
+                      properties: { rank: { type: 'integer', required: true }, score: { type: 'number', required: true }, forced: { type: 'boolean' } },
+                    },
+                    final: {
+                      type: 'object',
+                      additionalProperties: false,
+                      properties: { returnedByLimit: { type: 'boolean', required: true }, cutoffRank: { type: 'integer', required: true } },
+                    },
+                  },
+                },
               },
             },
           },
@@ -100,9 +244,13 @@ export function createSearchTool(runtime: WorkspaceSearchRuntime, config: Search
       if (modifiedAfter !== undefined && modifiedBefore !== undefined && modifiedAfter > modifiedBefore) {
         throw new Error('zvec_search modifiedAfter must not be later than modifiedBefore')
       }
+      const symbolTypes = parseSymbolTypes(args.symbolTypes)
       return project(await runtime.search(root, {
         query: args.query,
         limit,
+        ...(args.trace === undefined ? {} : { trace: args.trace }),
+        ...(args.preferSymbol === undefined ? {} : { preferSymbol: args.preferSymbol }),
+        ...(symbolTypes === undefined ? {} : { symbolTypes }),
         ...(modifiedAfter === undefined ? {} : { modifiedAfter }),
         ...(modifiedBefore === undefined ? {} : { modifiedBefore }),
       }))

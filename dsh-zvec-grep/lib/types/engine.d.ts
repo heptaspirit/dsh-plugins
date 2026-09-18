@@ -16,6 +16,49 @@ export type ZvecItemRange = {
 } | {
     kind: 'file' | 'byte' | 'page_region';
 };
+export type ZvecCodeSymbolType = 'module' | 'class' | 'interface' | 'function' | 'value' | 'alias';
+/** Mirrors the engine's `CodeEntityMetadata`; fields the tool does not project are omitted. */
+export interface ZvecCodeEntityMetadata {
+    kind: 'code';
+    symbolType: ZvecCodeSymbolType;
+    symbolName: string | null;
+    scope: string | null;
+    signature: string | null;
+    doc: string | null;
+    modifiers: readonly string[];
+}
+/** Mirrors the engine's `MarkdownEntityMetadata`. */
+export interface ZvecMarkdownEntityMetadata {
+    kind: 'markdown';
+    heading: string | null;
+    level: number | null;
+    scope: string | null;
+}
+export type ZvecEntityMetadata = ZvecCodeEntityMetadata | ZvecMarkdownEntityMetadata;
+export interface ZvecSearchRecallTrace {
+    path: 'fts' | 'vector';
+    routeId?: string;
+    query?: string;
+    found: boolean;
+    forced?: boolean;
+    rank?: number;
+    score?: number;
+    reason?: string;
+}
+export interface ZvecSearchStageTrace {
+    rank: number;
+    score: number;
+    forced?: boolean;
+}
+export interface ZvecSearchHitTrace {
+    recall: readonly ZvecSearchRecallTrace[];
+    fusion?: ZvecSearchStageTrace;
+    ranking?: ZvecSearchStageTrace;
+    final: {
+        returnedByLimit: boolean;
+        cutoffRank: number;
+    };
+}
 export interface ZvecContextItem {
     file: {
         relativePath: string;
@@ -26,6 +69,8 @@ export interface ZvecContextItem {
     status: 'fresh' | 'possibly_stale';
     matchedBy: string | readonly string[];
     score?: number;
+    metadata?: ZvecEntityMetadata;
+    trace?: ZvecSearchHitTrace;
 }
 export interface ZvecContextResult {
     query: string;
@@ -33,6 +78,23 @@ export interface ZvecContextResult {
     source: 'index' | 'rg';
     coverage: 'ranked_sample' | 'rg_exhaustive' | 'rg_truncated';
     items: ZvecContextItem[];
+}
+/** Mirrors the engine's `IndexEmbeddingProgress` (`dist/engine/types.d.ts`). */
+export interface ZvecEmbeddingProgress {
+    stage?: 'preparing' | 'downloading' | 'ready' | 'warning';
+    model?: string;
+    downloadedBytes?: number;
+    totalBytes?: number;
+    message?: string;
+}
+/** Mirrors the engine's `IndexProgress` callback payload. */
+export interface ZvecIndexProgress {
+    phase: 'scanning' | 'indexing' | 'done';
+    filesTotal?: number;
+    filesIndexed?: number;
+    filesFailed?: number;
+    detail?: string;
+    embedding?: ZvecEmbeddingProgress;
 }
 export interface ZvecIndexOptions {
     root?: string;
@@ -48,6 +110,8 @@ export interface ZvecIndexOptions {
      */
     resetPaths?: boolean;
     signal?: AbortSignal;
+    /** Receives the engine's index progress stream (scan counts, embedding download). */
+    onProgress?: (progress: ZvecIndexProgress) => void;
 }
 export interface ZvecContextOptions {
     query?: string;
@@ -60,6 +124,12 @@ export interface ZvecContextOptions {
     modifiedAfter?: number;
     /** Epoch milliseconds; only files modified at or before this time. */
     modifiedBefore?: number;
+    /** Attach per-hit recall/fusion/ranking diagnostics to the returned items. */
+    trace?: boolean;
+    /** Prefer indexed code symbols over surrounding prose fragments. */
+    preferSymbol?: boolean;
+    /** With `preferSymbol`, restrict the preferred symbols to these types. */
+    symbolTypes?: readonly ZvecCodeSymbolType[];
 }
 export interface ZvecEngineOptions {
     root: string;

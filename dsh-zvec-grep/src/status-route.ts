@@ -46,7 +46,7 @@ export function registerStatusRoute(
         const config = readWorkspaceConfig(root)
         const shared = { enabled: isEnabled(root), scope: config?.scope ?? null }
         if (!isEnabled(root)) {
-          return { root, status: 'disabled' as const, pendingChanges: 0, updatedAt: 0, ...shared }
+          return { root, status: 'disabled' as const, pendingChanges: 0, updatedAt: 0, progress: null, ...shared }
         }
         const internal = runtime.statusFor(root)
         return internal === undefined ? {
@@ -54,18 +54,20 @@ export function registerStatusRoute(
           status: 'indexing',
           pendingChanges: 0,
           updatedAt: 0,
+          progress: null,
           ...shared,
         } : {
           root,
           status: internal.status,
           pendingChanges: internal.pendingChanges,
           updatedAt: internal.updatedAt,
+          progress: internal.progress ?? null,
           ...(internal.status === 'error' ? { errorCode: 'index_failed' } : {}),
           ...shared,
         }
       })
       return new Response(JSON.stringify({
-        version: 4,
+        version: 5,
         pollIntervalMs,
         ...(engine === undefined ? {} : { engine }),
         workspaces,

@@ -43,12 +43,26 @@ const colors = {
 	error: "var(--dsw-alias-state-error-primary)",
 	disabled: "var(--dsw-alias-label-secondary)"
 };
+const MB = 1024 * 1024;
+/** One-line summary of the latest engine index progress for the expanded panel. */
+function progressText(progress) {
+	if (progress === void 0) return void 0;
+	const parts = [];
+	if (progress.phase === "scanning") parts.push("Scanning files");
+	if (progress.phase === "indexing" && progress.filesTotal !== void 0) parts.push(`Indexing ${progress.filesIndexed ?? 0}/${progress.filesTotal} files`);
+	const embedding = progress.embedding;
+	if (embedding?.stage === "downloading" && embedding.totalBytes !== void 0 && embedding.totalBytes > 0) parts.push(`Model ${((embedding.downloadedBytes ?? 0) / MB).toFixed(1)}/${(embedding.totalBytes / MB).toFixed(1)} MB`);
+	if (embedding?.message !== void 0) parts.push(embedding.message);
+	if (parts.length === 0 && progress.detail !== void 0) parts.push(progress.detail);
+	return parts.length > 0 ? parts.join(" · ") : void 0;
+}
 function displayStatus(feed) {
 	if (feed.connection === "error") return {
 		status: "error",
 		pendingChanges: 0,
 		updatedAt: 0,
-		errorCode: "index_failed"
+		errorCode: "index_failed",
+		progress: void 0
 	};
 	return feed.status;
 }
@@ -71,6 +85,7 @@ function IndexStatusPill(props) {
 	const phase = status?.status ?? "indexing";
 	const label = status === void 0 && feed.connection === "loading" ? "Loading" : labels[phase];
 	const reason = feed.connection === "error" ? feed.message : void 0;
+	const progress = progressText(status?.progress);
 	return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 		style: styles.anchor,
 		"data-zvec-index-status": phase,
@@ -87,6 +102,7 @@ function IndexStatusPill(props) {
 					children: root
 				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", { children: ["Status: ", label] }),
+				progress !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: progress }),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", { children: ["Pending changes: ", status?.pendingChanges ?? 0] }),
 				status?.errorCode && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 					style: styles.error,
@@ -193,6 +209,25 @@ const SCOPE_PATH = "/api/dsh-zvec-grep/scope";
 const ERROR_RETRY_MS = 5e3;
 const MISSING_WORKSPACE_RETRY_MS = 250;
 const INITIAL_SNAPSHOT = Object.freeze({ connection: "loading" });
+function parseProgress(value) {
+	if (value === null || value === void 0) return void 0;
+	if (typeof value !== "object" || Array.isArray(value)) return void 0;
+	const item = value;
+	if (![
+		"scanning",
+		"indexing",
+		"done"
+	].includes(String(item.phase))) return void 0;
+	const embedding = typeof item.embedding === "object" && item.embedding !== null && !Array.isArray(item.embedding) ? item.embedding : void 0;
+	return {
+		phase: item.phase,
+		...typeof item.filesTotal === "number" ? { filesTotal: item.filesTotal } : {},
+		...typeof item.filesIndexed === "number" ? { filesIndexed: item.filesIndexed } : {},
+		...typeof item.filesFailed === "number" ? { filesFailed: item.filesFailed } : {},
+		...typeof item.detail === "string" ? { detail: item.detail } : {},
+		...embedding === void 0 ? {} : { embedding }
+	};
+}
 function parseWorkspace(value) {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return void 0;
 	const item = value;
@@ -203,6 +238,7 @@ function parseWorkspace(value) {
 		"error",
 		"disabled"
 	].includes(String(item.status)) || typeof item.pendingChanges !== "number" || typeof item.updatedAt !== "number") return void 0;
+	const progress = parseProgress(item.progress);
 	return Object.freeze({
 		root: item.root,
 		status: item.status,
@@ -210,13 +246,14 @@ function parseWorkspace(value) {
 		updatedAt: item.updatedAt,
 		...item.errorCode === "index_failed" ? { errorCode: "index_failed" } : {},
 		...typeof item.enabled === "boolean" ? { enabled: item.enabled } : {},
-		...item.scope === null || typeof item.scope === "object" && !Array.isArray(item.scope) ? { scope: item.scope } : {}
+		...item.scope === null || typeof item.scope === "object" && !Array.isArray(item.scope) ? { scope: item.scope } : {},
+		...progress === void 0 ? {} : { progress }
 	});
 }
 function parsePayload(value) {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Invalid zvec status response");
 	const payload = value;
-	if (payload.version !== 4 || typeof payload.pollIntervalMs !== "number" || !Array.isArray(payload.workspaces)) throw new Error("Invalid zvec status response");
+	if (payload.version !== 5 || typeof payload.pollIntervalMs !== "number" || !Array.isArray(payload.workspaces)) throw new Error("Invalid zvec status response");
 	const workspaces = payload.workspaces.map(parseWorkspace);
 	if (workspaces.some((item) => item === void 0)) throw new Error("Invalid zvec workspace status");
 	return {

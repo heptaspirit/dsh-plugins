@@ -73,6 +73,46 @@ describe('WorkspaceSearchRuntime', () => {
     ])
   })
 
+  it('forwards engine index progress into the status snapshot', async () => {
+    let emitProgress!: (progress: unknown) => void
+    const backend = engine()
+    vi.mocked(backend.index).mockImplementationOnce(async (options: unknown) => {
+      emitProgress = (options as { onProgress?: (progress: unknown) => void }).onProgress ?? (() => undefined)
+      emitProgress({ phase: 'scanning' })
+      await new Promise(resolve => setTimeout(resolve, 5))
+      emitProgress({ phase: 'indexing', filesTotal: 12, filesIndexed: 9, embedding: { stage: 'downloading', downloadedBytes: 1024, totalBytes: 4096 } })
+      return { filesIndexed: 12 }
+    })
+    const fixture = harness(backend)
+    fixture.runtime.activate(WORKSPACE)
+    await new Promise(resolve => setTimeout(resolve, 1))
+
+    expect(fixture.runtime.status()).toEqual([
+      expect.objectContaining({ root: WORKSPACE, status: 'indexing', progress: { phase: 'scanning' } }),
+    ])
+    await fixture.runtime.settled(WORKSPACE)
+    expect(fixture.runtime.status()).toEqual([
+      expect.objectContaining({
+        root: WORKSPACE,
+        status: 'ready',
+        progress: { phase: 'indexing', filesTotal: 12, filesIndexed: 9, embedding: { stage: 'downloading', downloadedBytes: 1024, totalBytes: 4096 } },
+      }),
+    ])
+  })
+
+  it('passes an onProgress callback on every engine index call', async () => {
+    vi.useFakeTimers()
+    const fixture = harness()
+    fixture.runtime.activate(WORKSPACE)
+    await vi.advanceTimersByTimeAsync(0)
+    fixture.callbacks().change(`${WORKSPACE}/src/a.ts`)
+    await vi.advanceTimersByTimeAsync(25)
+
+    for (const call of vi.mocked(fixture.backend.index).mock.calls) {
+      expect(call[0]).toMatchObject({ onProgress: expect.any(Function) })
+    }
+  })
+
   it('deduplicates activation for sessions sharing a workspace', async () => {
     const backend = engine()
     const create = vi.fn(async () => backend)

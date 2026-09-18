@@ -44,7 +44,7 @@ When Harness creates or resumes a session, the plugin reads the workspace from t
 
 Added, changed, and deleted paths are debounced and submitted to zvec-grep's incremental index API in the background. An hourly full reconciliation repairs drift if the operating-system watcher missed an event.
 
-The Harness workspace also gets a **Zvec index** status pill. It reports `Indexing`, `Refreshing`, `Ready`, `Error`, or `Off` without blocking search. Select the pill to see the active workspace and the pending change count; the pill is read-only - enablement and scope live in the settings page. The UI is installed with the plugin; there is no separate frontend setup.
+The Harness workspace also gets a **Zvec index** status pill. It reports `Indexing`, `Refreshing`, `Ready`, `Error`, or `Off` without blocking search. Select the pill to see the active workspace, the pending change count, and the latest index progress (scanning, per-file counts, and embedding-model download); the pill is read-only - enablement and scope live in the settings page. The UI is installed with the plugin; there is no separate frontend setup.
 
 The settings **Plugins** page has a **Zvec Search** card listing every workspace known to the session, each with an indexing switch and an excluded-directories editor (entries match the `excludePaths` rules below). Advanced scope fields (globs, file types, depth limits, ...) stay agent-managed through `zvec_manage`; card edits merge into the persisted scope, so they never erase agent-set fields. The list follows live sessions: right after a restart only the restored session's workspace is listed, and the others appear as you open them - each workspace's enablement persists in its own `.zvec-grep/config.json` regardless.
 
@@ -76,6 +76,8 @@ The first workspace may download the default local embedding model. Indexes are 
 Use it when wording or location is unknown, or when the question requires architecture, relationships, control flow, design rationale, or synthesis across files. Use Harness' exact grep for known identifiers, literals, regular expressions, configuration keys, error messages, and exhaustive occurrence lists.
 
 Optional time filters narrow results to files modified in a window: pass `modifiedAfter` and/or `modifiedBefore` as ISO 8601 dates or timestamps (e.g. `2026-09-15` or `2026-09-15T10:00:00Z`). Both bounds together must form a non-empty window.
+
+Symbol-aware retrieval: pass `preferSymbol: true` to prefer indexed code symbols over surrounding prose, optionally narrowed with `symbolTypes` (one or more of `module`, `class`, `interface`, `function`, `value`, `alias`, e.g. `["function", "class"]`). Pass `trace: true` to attach per-hit retrieval diagnostics (recall routes, fusion, ranking) to each result when debugging retrieval quality. Indexed results may also carry `metadata`: code symbol facts (symbol type, name, signature, doc, modifiers) or markdown heading context (heading, level, scope).
 
 `zvec_manage` governs the calling session's workspace index:
 

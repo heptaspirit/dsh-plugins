@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import type { PropsRuntime, SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
-import type { IndexStatusSnapshot, IndexStatusSource, WorkspaceIndexStatus } from './status-source.ts'
+import type { IndexStatusSnapshot, IndexStatusSource, WorkspaceIndexProgress, WorkspaceIndexStatus } from './status-source.ts'
 
 export type IndexStatusPillProps = PropsRuntime<'shell.overlay'> & {
   useIndexStatus: SnapshotSelectorHook<IndexStatusSnapshot>
@@ -25,9 +25,28 @@ const colors = {
   disabled: 'var(--dsw-alias-label-secondary)',
 } as const
 
-function displayStatus(feed: IndexStatusSnapshot): WorkspaceIndexStatus | { status: 'error'; pendingChanges: 0; updatedAt: number; errorCode: 'index_failed' } | undefined {
+const MB = 1024 * 1024
+
+/** One-line summary of the latest engine index progress for the expanded panel. */
+function progressText(progress: WorkspaceIndexProgress | undefined): string | undefined {
+  if (progress === undefined) return undefined
+  const parts: string[] = []
+  if (progress.phase === 'scanning') parts.push('Scanning files')
+  if (progress.phase === 'indexing' && progress.filesTotal !== undefined) {
+    parts.push(`Indexing ${progress.filesIndexed ?? 0}/${progress.filesTotal} files`)
+  }
+  const embedding = progress.embedding
+  if (embedding?.stage === 'downloading' && embedding.totalBytes !== undefined && embedding.totalBytes > 0) {
+    parts.push(`Model ${((embedding.downloadedBytes ?? 0) / MB).toFixed(1)}/${(embedding.totalBytes / MB).toFixed(1)} MB`)
+  }
+  if (embedding?.message !== undefined) parts.push(embedding.message)
+  if (parts.length === 0 && progress.detail !== undefined) parts.push(progress.detail)
+  return parts.length > 0 ? parts.join(' · ') : undefined
+}
+
+function displayStatus(feed: IndexStatusSnapshot): WorkspaceIndexStatus | { status: 'error'; pendingChanges: 0; updatedAt: number; errorCode: 'index_failed'; progress: undefined } | undefined {
   if (feed.connection === 'error') {
-    return { status: 'error', pendingChanges: 0, updatedAt: 0, errorCode: 'index_failed' }
+    return { status: 'error', pendingChanges: 0, updatedAt: 0, errorCode: 'index_failed', progress: undefined }
   }
   return feed.status
 }
@@ -54,6 +73,7 @@ export function IndexStatusPill(props: IndexStatusPillProps) {
   // The host deliberately never sends its own index-error text, so a failing poll is the only
   // case that can name a reason: that message is the client's own transport failure.
   const reason = feed.connection === 'error' ? feed.message : undefined
+  const progress = progressText(status?.progress)
   return (
     <div style={styles.anchor} data-zvec-index-status={phase}>
       {expanded && (
@@ -61,6 +81,7 @@ export function IndexStatusPill(props: IndexStatusPillProps) {
           <strong style={styles.heading}>Zvec index</strong>
           <span style={styles.path}>{root}</span>
           <span>Status: {label}</span>
+          {progress !== undefined && <span>{progress}</span>}
           <span>Pending changes: {status?.pendingChanges ?? 0}</span>
           {status?.errorCode && <span style={styles.error}>{feed.connection === 'error' ? 'Status unavailable' : 'Index update failed'}</span>}
           {reason !== undefined && <span style={styles.error}>{reason}</span>}

@@ -62,6 +62,26 @@ describe('IndexStatusPill', () => {
     expect(container.innerHTML).toBe('')
   })
 
+  it('shows the latest index progress in the expanded panel', () => {
+    const props = {
+      useSessions: (selector: (value: typeof sessions) => unknown) => selector(sessions),
+      useIndexStatus: (selector: (value: unknown) => unknown) => selector({
+        connection: 'ready',
+        status: {
+          status: 'indexing',
+          pendingChanges: 0,
+          updatedAt: 42,
+          progress: { phase: 'indexing', filesTotal: 120, filesIndexed: 45, embedding: { stage: 'downloading', downloadedBytes: 1.5 * 1024 * 1024, totalBytes: 30 * 1024 * 1024 } },
+        },
+      }),
+      statusSource: { selectWorkspace: () => undefined },
+    } as unknown as IndexStatusPillProps
+    render(<IndexStatusPill {...props} />)
+
+    fireEvent.click(screen.getByRole('button'))
+    expect(screen.getByText(/Indexing 45\/120 files · Model 1\.5\/30\.0 MB/)).toBeTruthy()
+  })
+
   it('stays read-only: no toggle button, with a pointer to the settings section', () => {
     const props = {
       useSessions: (selector: (value: typeof sessions) => unknown) => selector(sessions),

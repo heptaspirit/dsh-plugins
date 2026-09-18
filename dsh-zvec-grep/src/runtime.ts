@@ -1,8 +1,8 @@
 import { canonicalizeRoot, dropWorkspaceIndexStorage } from './config-file.ts'
 import type { WorkspaceScopeConfig } from './config-file.ts'
-import type { SearchEngine, ZvecContextOptions, ZvecContextResult } from './engine.ts'
+import type { SearchEngine, ZvecContextOptions, ZvecContextResult, ZvecIndexProgress } from './engine.ts'
 
-export type { SearchEngine } from './engine.ts'
+export type { SearchEngine, ZvecIndexProgress } from './engine.ts'
 
 export interface WorkspaceWatcher {
   ready?: Promise<void>
@@ -27,6 +27,8 @@ export interface WorkspaceIndexStatus {
   pendingChanges: number
   updatedAt: number
   message?: string
+  /** Latest engine index progress (scan counts, embedding download); absent until one arrives. */
+  progress?: ZvecIndexProgress
 }
 
 export interface WorkspaceSearchRuntimeOptions {
@@ -68,6 +70,7 @@ interface WorkspaceState {
   /** Set by `rebuild()` and consumed by the next refresh pass. */
   pendingRebuild: boolean
   engineFailed: boolean
+  progress?: ZvecIndexProgress
 }
 
 const statusMessages = {
@@ -122,6 +125,7 @@ export class WorkspaceSearchRuntime {
       status: state.phase,
       pendingChanges: state.changedPaths.size + (state.fullReconcile ? 1 : 0),
       updatedAt: state.updatedAt,
+      ...(state.progress ? { progress: state.progress } : {}),
       ...(state.phase === 'error' ? { message: errorMessage(state.error) } : {}),
     }))
   }
@@ -255,7 +259,7 @@ export class WorkspaceSearchRuntime {
       await state.watcher?.ready
       state.controller.signal.throwIfAborted()
       const engine = await state.engine
-      await engine.index({ root: state.root, signal: state.controller.signal, resetPaths: true, ...this.engineOptions(state.root) })
+      await engine.index({ root: state.root, signal: state.controller.signal, resetPaths: true, onProgress: progress => this.recordProgress(state, progress), ...this.engineOptions(state.root) })
       this.setPhase(state, state.changedPaths.size > 0 || state.fullReconcile ? 'refreshing' : 'ready')
       state.error = undefined
       state.engineFailed = false
@@ -312,6 +316,7 @@ export class WorkspaceSearchRuntime {
       await engine.index({
         root: state.root,
         signal: state.controller.signal,
+        onProgress: progress => this.recordProgress(state, progress),
         ...(fullReconcile ? { resetPaths: true } : {}),
         ...(rebuild ? { rebuild: true } : {}),
         ...(fullReconcile || rebuild ? {} : { changedPaths }),
@@ -328,6 +333,18 @@ export class WorkspaceSearchRuntime {
     if (state.phase === phase) return
     state.phase = phase
     state.updatedAt = Date.now()
+  }
+
+  /**
+   * Stores the latest engine index progress for status polling. The engine owns the snapshot it
+   * passes in, so the runtime keeps its own shallow copy and never mutates or exposes it further.
+   */
+  private recordProgress(state: WorkspaceState, progress: ZvecIndexProgress): void {
+    if (state.controller.signal.aborted) return
+    state.progress = {
+      ...progress,
+      ...(progress.embedding === undefined ? {} : { embedding: { ...progress.embedding } }),
+    }
   }
 
   /**

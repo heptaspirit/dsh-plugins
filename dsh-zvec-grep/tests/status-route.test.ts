@@ -26,11 +26,11 @@ describe('status route', () => {
     expect(route.requestBody).toBe('buffered')
     expect(response.headers.get('cache-control')).toBe('no-store')
     expect(await response.json()).toEqual({
-      version: 4,
+      version: 5,
       pollIntervalMs: 2000,
       workspaces: [
-        { root: '/repo', status: 'ready', pendingChanges: 0, updatedAt: 42, enabled: true, scope: null },
-        { root: '/other', status: 'indexing', pendingChanges: 0, updatedAt: 0, enabled: true, scope: null },
+        { root: '/repo', status: 'ready', pendingChanges: 0, updatedAt: 42, progress: null, enabled: true, scope: null },
+        { root: '/other', status: 'indexing', pendingChanges: 0, updatedAt: 0, progress: null, enabled: true, scope: null },
       ],
     })
     expect(dispose).toBeTypeOf('function')
@@ -43,9 +43,9 @@ describe('status route', () => {
     registerStatusRoute({ register } as never, runtime as never, { list: () => [{ id: 'a', header: { cwd: '/repo' } }] }, 2000, root => root !== '/repo')
 
     expect(await (await route.fetch(new Request('http://localhost/api/dsh-zvec-grep/status'))).json()).toEqual({
-      version: 4,
+      version: 5,
       pollIntervalMs: 2000,
-      workspaces: [{ root: '/repo', status: 'disabled', pendingChanges: 0, updatedAt: 0, enabled: false, scope: null }],
+      workspaces: [{ root: '/repo', status: 'disabled', pendingChanges: 0, updatedAt: 0, progress: null, enabled: false, scope: null }],
     })
   })
 
@@ -61,7 +61,7 @@ describe('status route', () => {
     )
 
     expect((await (await route.fetch(new Request('http://localhost/api/dsh-zvec-grep/status'))).json()).workspaces)
-      .toEqual([{ root: '/repo', status: 'indexing', pendingChanges: 0, updatedAt: 0, enabled: true, scope: null }])
+      .toEqual([{ root: '/repo', status: 'indexing', pendingChanges: 0, updatedAt: 0, progress: null, enabled: true, scope: null }])
   })
 
   it('requires at least one session with a workspace', async () => {
@@ -70,6 +70,24 @@ describe('status route', () => {
     registerStatusRoute({ register } as never, { statusFor: vi.fn(() => undefined) } as never, { list: () => [] }, 2000, () => true)
 
     expect((await route.fetch(new Request('http://localhost/api/dsh-zvec-grep/status'))).status).toBe(404)
+  })
+
+  it('passes the latest index progress through to the payload', async () => {
+    let route!: { fetch: (request: Request) => Promise<Response> }
+    const register = vi.fn((next: typeof route) => { route = next; return vi.fn() })
+    const runtime = {
+      statusFor: vi.fn(() => ({
+        root: '/repo',
+        status: 'indexing',
+        pendingChanges: 0,
+        updatedAt: 42,
+        progress: { phase: 'indexing', filesTotal: 12, filesIndexed: 9, embedding: { stage: 'downloading', downloadedBytes: 1024, totalBytes: 4096 } },
+      })),
+    }
+    registerStatusRoute({ register } as never, runtime as never, { list: () => [{ id: 'a', header: { cwd: '/repo' } }] }, 2000, () => true)
+
+    const payload = await (await route.fetch(new Request('http://localhost/api/dsh-zvec-grep/status'))).json()
+    expect(payload.workspaces[0].progress).toEqual({ phase: 'indexing', filesTotal: 12, filesIndexed: 9, embedding: { stage: 'downloading', downloadedBytes: 1024, totalBytes: 4096 } })
   })
 
   it('reports an index failure without exposing internal errors', async () => {
@@ -83,9 +101,9 @@ describe('status route', () => {
     const payload = await (await route.fetch(new Request('http://localhost/api/dsh-zvec-grep/status'))).json()
 
     expect(payload).toEqual({
-      version: 4,
+      version: 5,
       pollIntervalMs: 2000,
-      workspaces: [{ root: '/repo', status: 'error', pendingChanges: 0, updatedAt: 42, errorCode: 'index_failed', enabled: true, scope: null }],
+      workspaces: [{ root: '/repo', status: 'error', pendingChanges: 0, updatedAt: 42, progress: null, errorCode: 'index_failed', enabled: true, scope: null }],
     })
     expect(JSON.stringify(payload)).not.toContain('/secret failed')
   })

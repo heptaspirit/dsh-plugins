@@ -2,11 +2,29 @@ import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 
 export type IndexPhase = 'indexing' | 'refreshing' | 'ready' | 'error' | 'disabled'
 
+/** Mirrors the status payload's progress object (from v5); the runtime copies engine snapshots. */
+export interface WorkspaceIndexProgress {
+  phase: 'scanning' | 'indexing' | 'done'
+  filesTotal?: number
+  filesIndexed?: number
+  filesFailed?: number
+  detail?: string
+  embedding?: {
+    stage?: 'preparing' | 'downloading' | 'ready' | 'warning'
+    model?: string
+    downloadedBytes?: number
+    totalBytes?: number
+    message?: string
+  }
+}
+
 export interface WorkspaceIndexStatus {
   status: IndexPhase
   pendingChanges: number
   updatedAt: number
   errorCode?: 'index_failed'
+  /** Latest engine index progress (status payload v5); absent when the payload carried none or `null`. */
+  progress?: WorkspaceIndexProgress
 }
 
 export interface WorkspaceStatus extends WorkspaceIndexStatus {
@@ -33,6 +51,24 @@ const MISSING_WORKSPACE_RETRY_MS = 250
 
 const INITIAL_SNAPSHOT: IndexStatusSnapshot = Object.freeze({ connection: 'loading' })
 
+function parseProgress(value: unknown): WorkspaceIndexProgress | undefined {
+  if (value === null || value === undefined) return undefined
+  if (typeof value !== 'object' || Array.isArray(value)) return undefined
+  const item = value as Record<string, unknown>
+  if (!['scanning', 'indexing', 'done'].includes(String(item.phase))) return undefined
+  const embedding = typeof item.embedding === 'object' && item.embedding !== null && !Array.isArray(item.embedding)
+    ? item.embedding as WorkspaceIndexProgress['embedding']
+    : undefined
+  return {
+    phase: item.phase as WorkspaceIndexProgress['phase'],
+    ...(typeof item.filesTotal === 'number' ? { filesTotal: item.filesTotal } : {}),
+    ...(typeof item.filesIndexed === 'number' ? { filesIndexed: item.filesIndexed } : {}),
+    ...(typeof item.filesFailed === 'number' ? { filesFailed: item.filesFailed } : {}),
+    ...(typeof item.detail === 'string' ? { detail: item.detail } : {}),
+    ...(embedding === undefined ? {} : { embedding }),
+  }
+}
+
 function parseWorkspace(value: unknown): WorkspaceStatus | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   const item = value as Record<string, unknown>
@@ -42,6 +78,7 @@ function parseWorkspace(value: unknown): WorkspaceStatus | undefined {
     || typeof item.pendingChanges !== 'number'
     || typeof item.updatedAt !== 'number'
   ) return undefined
+  const progress = parseProgress(item.progress)
   return Object.freeze({
     root: item.root,
     status: item.status as IndexPhase,
@@ -50,13 +87,14 @@ function parseWorkspace(value: unknown): WorkspaceStatus | undefined {
     ...(item.errorCode === 'index_failed' ? { errorCode: 'index_failed' as const } : {}),
     ...(typeof item.enabled === 'boolean' ? { enabled: item.enabled } : {}),
     ...(item.scope === null || (typeof item.scope === 'object' && !Array.isArray(item.scope)) ? { scope: item.scope as Record<string, unknown> | null } : {}),
+    ...(progress === undefined ? {} : { progress }),
   })
 }
 
 function parsePayload(value: unknown): { pollIntervalMs: number; workspaces: WorkspaceStatus[] } {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('Invalid zvec status response')
   const payload = value as Record<string, unknown>
-  if (payload.version !== 4 || typeof payload.pollIntervalMs !== 'number' || !Array.isArray(payload.workspaces)) {
+  if (payload.version !== 5 || typeof payload.pollIntervalMs !== 'number' || !Array.isArray(payload.workspaces)) {
     throw new Error('Invalid zvec status response')
   }
   const workspaces = payload.workspaces.map(parseWorkspace)

@@ -1,10 +1,27 @@
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots';
 export type IndexPhase = 'indexing' | 'refreshing' | 'ready' | 'error' | 'disabled';
+/** Mirrors the status payload's progress object (from v5); the runtime copies engine snapshots. */
+export interface WorkspaceIndexProgress {
+    phase: 'scanning' | 'indexing' | 'done';
+    filesTotal?: number;
+    filesIndexed?: number;
+    filesFailed?: number;
+    detail?: string;
+    embedding?: {
+        stage?: 'preparing' | 'downloading' | 'ready' | 'warning';
+        model?: string;
+        downloadedBytes?: number;
+        totalBytes?: number;
+        message?: string;
+    };
+}
 export interface WorkspaceIndexStatus {
     status: IndexPhase;
     pendingChanges: number;
     updatedAt: number;
     errorCode?: 'index_failed';
+    /** Latest engine index progress (status payload v5); absent when the payload carried none or `null`. */
+    progress?: WorkspaceIndexProgress;
 }
 export interface WorkspaceStatus extends WorkspaceIndexStatus {
     root: string;
